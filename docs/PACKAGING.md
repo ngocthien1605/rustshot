@@ -9,9 +9,9 @@ A `cargo-deny` policy gates dependency licenses/advisories.
 pwsh -File scripts/build-portable.ps1
 ```
 
-Produces `dist/RustShot-<version>-portable-x64.zip` containing `rustshot.exe`, `USER-GUIDE.md`,
-and `LICENSE`. The step-by-step Manual Guide (`docs/MANUAL-GUIDE.md`, Vietnamese
-`docs/MANUAL-GUIDE.vi.md`) is read on GitHub and is not in the zip. The build also produces `rustshot-dev.exe` (developer diagnostics); it is a
+Produces `dist/RustShot-<version>-portable-x64.zip` containing `rustshot.exe`, the Manual Guide
+(`MANUAL-GUIDE.md` and the Vietnamese `MANUAL-GUIDE.vi.md`), `USER-GUIDE.md`, and `LICENSE`.
+The three guides sit side by side, as in `docs/`, so their links to each other work in both. The build also produces `rustshot-dev.exe` (developer diagnostics); it is a
 build artifact for development and QA and is not shipped. Unzip anywhere and run `rustshot.exe` — no installation, no admin rights. If the
 user enables "Run at startup", the registry entry points at the exe's current location, so keep
 the folder stable (or re-toggle the setting after moving it).

@@ -8,7 +8,7 @@ and global hotkeys.
 > Clean-room implementation inspired by the *capabilities* of Screenpresso. It contains no
 > Screenpresso code, assets, UI, or branding.
 
-**Latest release: [v0.1.7](https://github.com/ngocthien1605/rustshot/releases/latest)** — a
+**Latest release: [v0.1.8](https://github.com/ngocthien1605/rustshot/releases/latest)** — a
 portable zip, no installer. How to use it: **[Manual Guide](docs/MANUAL-GUIDE.md)** ·
 **[Hướng dẫn sử dụng (Tiếng Việt)](docs/MANUAL-GUIDE.vi.md)**.
 
@@ -155,7 +155,9 @@ rustshot/
 ## Documentation
 
 - [Manual Guide](docs/MANUAL-GUIDE.md) · [Hướng dẫn sử dụng (Tiếng Việt)](docs/MANUAL-GUIDE.vi.md) — step by step, for users
-- [User guide](docs/USER-GUIDE.md) — compact reference, including every `config.toml` key (shipped in the zip)
+- [User guide](docs/USER-GUIDE.md) — compact reference, including every `config.toml` key
+
+All three user guides ship in the portable zip.
 - [Packaging](docs/PACKAGING.md) — portable zip, releases, MSI
 - [Development plan](docs/PLAN.md) · [Design decisions](docs/DECISIONS.md) · [Progress](docs/PROGRESS.md) · [QA checklist](docs/QA-CHECKLIST.md)
 

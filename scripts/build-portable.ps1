@@ -1,5 +1,6 @@
 <#
-    Build a portable RustShot zip: a release build plus the user guide and license,
+    Build a portable RustShot zip: a release build plus the guides (manual in English and
+    Vietnamese, reference user guide) and the license,
     with no installer required. Output: dist/RustShot-<version>-portable-x64.zip
 
     Usage:  pwsh -File scripts/build-portable.ps1
@@ -24,6 +25,8 @@ try {
 
     Copy-Item (Join-Path $root 'target\release\rustshot.exe') $stage
     Copy-Item (Join-Path $root 'docs\USER-GUIDE.md') $stage
+    Copy-Item (Join-Path $root 'docs\MANUAL-GUIDE.md') $stage
+    Copy-Item (Join-Path $root 'docs\MANUAL-GUIDE.vi.md') $stage
     Copy-Item (Join-Path $root 'LICENSE') $stage
 
     $dist = Join-Path $root 'dist'

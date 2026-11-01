@@ -2,18 +2,19 @@
 
 Status legend: ✅ done & verified · 🟡 in progress · ⬜ not started · 🔬 manual-QA only (GPU/UI)
 
-## Current status (2026-10-23, release 0.1.7)
+## Current status (2026-11-01, release 0.1.8)
 
-- **Shipped:** v0.1.7 on GitHub (portable zip + `.sha256`, built by the release workflow).
-  Every phase M0–M7 is done, followed by review items 1–7 and the Settings microphone picker.
-- **Gate:** fmt, clippy `-D warnings`, build and **175 tests** green with `--locked`;
+- **Shipped:** v0.1.8 on GitHub (portable zip + `.sha256`, built by the release workflow).
+  Every phase M0–M7 is done, followed by review items 1–7, the Settings microphone picker and
+  the final-review fixes.
+- **Gate:** fmt, clippy `-D warnings`, build and **179 tests** green with `--locked`;
   `cargo deny check` ok; CI green on `master`, MSRV 1.90 checked.
 - **Open:** the manual hardware checks still to run (QA-CHECKLIST; Bluetooth mic through the
   picker, device unplug, read-back throttle, tray tooltip, run at startup, display unplug, GPU
   reset, a full 3-minute A/V sync), and the deferred items: code signing, an MSI that is
   actually built and tested, a capture history list.
 - **Docs:** step-by-step Manual Guide in English and Vietnamese (`MANUAL-GUIDE.md`,
-  `MANUAL-GUIDE.vi.md`) next to the reference `USER-GUIDE.md`.
+  `MANUAL-GUIDE.vi.md`) next to the reference `USER-GUIDE.md`; all three ship in the zip.
 
 The milestone sections below record each phase as it was finished; later changes are in the
 verification log at the end (newest first).
@@ -209,6 +210,9 @@ verification log at the end (newest first).
 ---
 
 ### Verification log
+- 2026-11-01: **Release 0.1.8** (tag `v0.1.8`): the final-review fixes (microphone setting kept
+  as written, same-name microphones, GIF write errors and memory cap), version info in the exe
+  and the startup log, and the Manual Guide (English + Vietnamese) in the portable zip.
 - 2026-11-01: Final review of the code written after the last review (independent read of
   `0c5ea11..c97da2c`). Fixed: Settings OK no longer rewrites `microphone_device` (an id, a
   partial name, or a name contained in a connected device's were replaced by that device's
