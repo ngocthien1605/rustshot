@@ -110,14 +110,21 @@ pub fn save_gif(
     let tmp = path.with_file_name(format!(".{name}.{}.tmp", std::process::id()));
     let encode = || -> Result<(), ImagingError> {
         let file = std::fs::File::create(&tmp).map_err(io_err(&tmp))?;
-        let mut encoder = GifEncoder::new_with_speed(std::io::BufWriter::new(file), 15);
-        encoder.set_repeat(Repeat::Infinite)?;
-        let durations: Vec<_> = frames.iter().map(|(_, d)| *d).collect();
-        for ((img, _), cs) in frames.iter().zip(gif_delays_cs(&durations)) {
-            // A zero delay would be shown as 100 ms by browsers; keep at least one unit.
-            let delay = Delay::from_numer_denom_ms(cs.max(1) as u32 * 10, 1);
-            encoder.encode_frame(Frame::from_parts(img.clone(), 0, 0, delay))?;
+        let mut out = LatchErr::new(std::io::BufWriter::new(file));
+        {
+            let mut encoder = GifEncoder::new_with_speed(&mut out, 15);
+            encoder.set_repeat(Repeat::Infinite)?;
+            let durations: Vec<_> = frames.iter().map(|(_, d)| *d).collect();
+            for ((img, _), cs) in frames.iter().zip(gif_delays_cs(&durations)) {
+                // A zero delay would be shown as 100 ms by browsers; keep at least one unit.
+                let delay = Delay::from_numer_denom_ms(cs.max(1) as u32 * 10, 1);
+                encoder.encode_frame(Frame::from_parts(img.clone(), 0, 0, delay))?;
+            }
+            // Dropping the encoder writes the GIF trailer, and the gif crate ignores errors
+            // there; `out` remembers them so a full disk can't leave a truncated file.
         }
+        let mut w = out.finish().map_err(io_err(&tmp))?;
+        std::io::Write::flush(&mut w).map_err(io_err(&tmp))?;
         Ok(())
     };
     let result = encode().and_then(|()| rename_with_retry(&tmp, path).map_err(io_err(path)));
@@ -125,6 +132,51 @@ pub fn save_gif(
         let _ = std::fs::remove_file(&tmp);
     }
     result
+}
+
+/// A writer that remembers its first error, for encoders that write in `Drop` and drop errors.
+struct LatchErr<W> {
+    inner: W,
+    err: Option<std::io::Error>,
+}
+
+impl<W: std::io::Write> LatchErr<W> {
+    fn new(inner: W) -> Self {
+        Self { inner, err: None }
+    }
+
+    /// The inner writer, or the first error any write or flush returned.
+    fn finish(self) -> std::io::Result<W> {
+        match self.err {
+            Some(e) => Err(e),
+            None => Ok(self.inner),
+        }
+    }
+
+    fn latch<T>(&mut self, r: std::io::Result<T>) -> std::io::Result<T> {
+        if let Err(e) = &r {
+            if self.err.is_none() {
+                // io::Error isn't Clone; keep the OS code (the caller maps "disk full" from it).
+                self.err = Some(match e.raw_os_error() {
+                    Some(code) => std::io::Error::from_raw_os_error(code),
+                    None => std::io::Error::new(e.kind(), e.to_string()),
+                });
+            }
+        }
+        r
+    }
+}
+
+impl<W: std::io::Write> std::io::Write for LatchErr<W> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let r = self.inner.write(buf);
+        self.latch(r)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        let r = self.inner.flush();
+        self.latch(r)
+    }
 }
 
 /// Errors from imaging operations.
@@ -142,6 +194,18 @@ pub enum ImagingError {
         #[source]
         source: std::io::Error,
     },
+}
+
+impl ImagingError {
+    /// The I/O error underneath, if this is one: a file error, or a write that failed while
+    /// an encoder was producing data (reported by the codec).
+    pub fn io_error(&self) -> Option<&std::io::Error> {
+        match self {
+            Self::Io { source, .. } => Some(source),
+            Self::Codec(image::ImageError::IoError(source)) => Some(source),
+            _ => None,
+        }
+    }
 }
 
 /// Convert a captured BGRA8 [`Frame`] into an `RgbaImage`, honouring `stride` padding.
@@ -762,5 +826,45 @@ mod tests {
             .unwrap()
             .color()
             .has_alpha());
+    }
+
+    /// Accepts `room` bytes, then fails like a full disk (ERROR_DISK_FULL = 112).
+    struct FullDisk {
+        room: usize,
+    }
+
+    impl std::io::Write for FullDisk {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            if self.room == 0 {
+                return Err(std::io::Error::from_raw_os_error(112));
+            }
+            let n = buf.len().min(self.room);
+            self.room -= n;
+            Ok(n)
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn latch_err_keeps_a_write_error_the_encoder_dropped() {
+        use std::io::Write;
+        let mut out = LatchErr::new(FullDisk { room: 4 });
+        // An encoder writing in Drop ignores this result...
+        let _ = out.write_all(b"GIF89a");
+        // ...but finishing reports it, with the OS code intact for the disk-full mapping.
+        let e = out.finish().err().expect("error latched");
+        assert_eq!(e.raw_os_error(), Some(112));
+        assert!(LatchErr::new(FullDisk { room: 8 }).finish().is_ok());
+    }
+
+    #[test]
+    fn io_error_sees_through_codec_errors() {
+        let codec = ImagingError::Codec(image::ImageError::IoError(
+            std::io::Error::from_raw_os_error(112),
+        ));
+        assert_eq!(codec.io_error().and_then(|e| e.raw_os_error()), Some(112));
+        assert!(ImagingError::FrameTooSmall.io_error().is_none());
     }
 }

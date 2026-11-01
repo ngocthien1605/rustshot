@@ -163,7 +163,9 @@ liệt kê phần nào bị thiếu và vì sao.
 GIF được giữ nhỏ có chủ đích: mặc định cạnh dài nhất tối đa **800 px**, **15 khung hình mỗi
 giây**, dài tối đa **30 giây**. Chạm giới hạn độ dài thì việc quay tự dừng và có thông báo. GIF
 không có tiếng. Các giới hạn này đổi được trong `config.toml` (`gif_max_width`, `gif_fps`,
-`gif_max_seconds`).
+`gif_max_seconds`). Dù đặt thế nào, GIF cũng tự dừng kèm thông báo khi các khung hình chiếm khoảng
+1 GB bộ nhớ; chuyện này chỉ xảy ra với GIF lớn, dài và nhiều chuyển động, và giảm chiều rộng
+hoặc số khung hình mỗi giây sẽ tránh được.
 
 ## 9. Cài đặt (Settings)
 
@@ -191,7 +193,8 @@ bấm **OK** (phím tắt được đăng ký lại, thư mục lưu đổi ngay
   Windows đặt mục này ở *Cài đặt → Hệ thống → Âm thanh → Đầu vào*. Lưu ý: Teams hay Zoom thường
   dùng một mục khác là "thiết bị *liên lạc* mặc định", nên micro chúng dùng có thể không phải
   micro RustShot lấy ở đây.
-- **Từng micro đang cắm, theo tên.** Chọn một micro để luôn ghi từ micro đó.
+- **Từng micro đang cắm, theo tên.** Chọn một micro để luôn ghi từ micro đó. Hai micro trùng
+  tên được đánh số "(1)" và "(2)".
 - **Micro đã chọn trước đây nhưng hiện không cắm** vẫn được giữ, kèm chữ **(not connected)**.
   Cho đến khi cắm lại, RustShot dùng micro mặc định và báo điều đó sau khi quay.
 

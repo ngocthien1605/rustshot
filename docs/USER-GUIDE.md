@@ -80,7 +80,8 @@ From the tray **Record** submenu:
   **Stop**. Output is an MP4 (H.264 + AAC), optionally with microphone and/or system audio.
   **Stop** (or `Ctrl+Shift+S`) finalizes a playable file.
 - **Record GIF (region/window)** — same selection, but produces an optimized, looping animated
-  GIF (bounded by the configured max width, frame rate, and duration).
+  GIF (bounded by the configured max width, frame rate, and duration, and by about 1 GB of
+  frames in memory; either limit ends the recording with a notice).
 
 Recordings are saved to the output folder with automatic names (`.mp4` / `.gif`).
 
@@ -119,7 +120,9 @@ microphone/system audio, run-at-startup, JPEG quality, video FPS, and the output
 Windows has set as the default input, named in brackets) or any connected microphone. A
 microphone you chose earlier that isn't connected right now stays selected, marked "not
 connected", so it is used again when you plug it back in; until then recordings use the default
-microphone and say so afterwards. The list is greyed out while "Record microphone" is off.
+microphone and say so afterwards. Microphones that share a name are numbered and remembered by
+their device id. Pressing OK without touching the list leaves `microphone_device` as it was.
+The list is greyed out while "Record microphone" is off.
 
 It also has a **Global hotkeys** section with an editable field for each of the six actions.
 Either click **Modify** next to a row and press the key combination you want (including

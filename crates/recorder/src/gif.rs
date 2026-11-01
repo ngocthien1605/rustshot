@@ -66,6 +66,11 @@ impl GifSession {
     }
 }
 
+/// Frames are held in memory until the GIF is encoded at the end. The length cap alone doesn't
+/// bound that (600 s × 50 fps × 7680 px wide is allowed), so the frames' total size is capped
+/// too, and reaching it ends the recording with a notice, like the length cap.
+const MAX_FRAME_BYTES: usize = 1 << 30;
+
 fn cap_err(e: capture_core::CaptureError) -> RecorderError {
     RecorderError::Capture(e.to_string())
 }
@@ -101,6 +106,7 @@ fn gif_loop(cfg: RecordCfg, paused: Arc<AtomicBool>, stopping: Arc<AtomicBool>) 
     let max_slots = fps as u64 * max_seconds as u64;
     let tick = Duration::from_nanos(1_000_000_000u64 / fps as u64);
     let mut frames: Vec<(Rgba, u64)> = Vec::new();
+    let mut frame_bytes: usize = 0;
     let mut slots: u64 = 0;
     let mut latest: Option<Frame> = None;
     let mut fresh = false;
@@ -155,7 +161,9 @@ fn gif_loop(cfg: RecordCfg, paused: Arc<AtomicBool>, stopping: Arc<AtomicBool>) 
                         Some((_, n)) if !fresh => *n += 1,
                         _ => match imaging::frame_to_rgba(f, true) {
                             Ok(rgba) => {
-                                frames.push((imaging::thumbnail(&rgba, max_width), 1));
+                                let thumb = imaging::thumbnail(&rgba, max_width);
+                                frame_bytes += thumb.as_raw().len();
+                                frames.push((thumb, 1));
                                 fresh = false;
                             }
                             Err(e) => {
@@ -165,6 +173,13 @@ fn gif_loop(cfg: RecordCfg, paused: Arc<AtomicBool>, stopping: Arc<AtomicBool>) 
                         },
                     }
                     slots += 1;
+                }
+                if frame_bytes >= MAX_FRAME_BYTES {
+                    ended_early = Some(format!(
+                        "its frames reached the {} MB memory limit for GIF recordings; a                          smaller gif_max_width or gif_fps allows a longer GIF",
+                        MAX_FRAME_BYTES >> 20
+                    ));
+                    break;
                 }
             }
         }
@@ -199,15 +214,15 @@ fn gif_loop(cfg: RecordCfg, paused: Arc<AtomicBool>, stopping: Arc<AtomicBool>) 
         .into_iter()
         .map(|(img, n)| (img, Duration::from_nanos(n * 1_000_000_000 / fps as u64)))
         .collect();
-    imaging::save_gif(&timed, &cfg.out_path).map_err(|e| match &e {
-        imaging::ImagingError::Io { source, .. }
-            if source
-                .raw_os_error()
-                .is_some_and(|c| crate::is_disk_full_code(c as u32)) =>
+    imaging::save_gif(&timed, &cfg.out_path).map_err(|e| {
+        if e.io_error()
+            .and_then(|s| s.raw_os_error())
+            .is_some_and(|c| crate::is_disk_full_code(c as u32))
         {
             RecorderError::DiskFull
+        } else {
+            RecorderError::Platform(format!("gif encode: {e}"))
         }
-        _ => RecorderError::Platform(format!("gif encode: {e}")),
     })?;
     match ended_early {
         Some(reason) => Err(RecorderError::EndedEarly {

@@ -271,8 +271,8 @@ impl Settings {
             self.recording.bitrate = 8_000_000;
             changed = true;
         }
-        // GIFs: a width the encoder can't use, or a zero/huge length cap (the frames are held in
-        // memory until the end, so the cap bounds memory too).
+        // GIFs: a width the encoder can't use, or a zero/huge length cap. (Frames are held in
+        // memory until the end; the recorder also caps their total size, see recorder::gif.)
         if !(16..=7680).contains(&self.recording.gif_max_width) {
             self.recording.gif_max_width = 800;
             changed = true;

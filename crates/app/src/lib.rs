@@ -165,7 +165,10 @@ fn start() -> anyhow::Result<()> {
         dispatch::with_app(|app| app.busy = false);
     }
 
-    tracing::info!("RustShot is running in the tray");
+    tracing::info!(
+        "RustShot {} is running in the tray",
+        env!("CARGO_PKG_VERSION")
+    );
     run_message_loop();
     // Tear the state down here, on the UI thread, whatever posted the WM_QUIT: this finalizes
     // any recording still running and destroys the remaining windows.

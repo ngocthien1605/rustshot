@@ -397,7 +397,8 @@ fn try_gather(hwnd: HWND, initial: &Settings, mics: &[MicChoice]) -> Result<Sett
     s.screenshot.copy_to_clipboard = is_checked(hwnd, CHK_CLIP);
     s.recording.capture_microphone = is_checked(hwnd, CHK_MIC);
     s.recording.capture_system_audio = is_checked(hwnd, CHK_SYS);
-    s.recording.microphone_device = selected_mic(hwnd, mics);
+    s.recording.microphone_device =
+        selected_mic(hwnd, mics, initial.recording.microphone_device.as_deref());
     s.run_at_startup = is_checked(hwnd, CHK_STARTUP);
     s.screenshot.format = if is_checked(hwnd, CHK_JPEG) {
         ImageFormat::Jpeg
@@ -500,7 +501,7 @@ fn show_in_taskbar(hwnd: HWND) {
         let ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
         SetWindowLongPtrW(hwnd, GWL_EXSTYLE, ex | WS_EX_APPWINDOW.0 as isize);
         if let Ok(module) = GetModuleHandleW(None) {
-            // Resource id 1 is the app icon (app.rc).
+            // Resource id 1 is the app icon (embedded by build.rs).
             if let Ok(icon) =
                 LoadIconW(Some(module.into()), PCWSTR(std::ptr::without_provenance(1)))
             {

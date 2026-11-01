@@ -164,7 +164,9 @@ missing and why.
 GIFs are kept small on purpose: by default at most **800 px** on the longer side, **15 frames
 per second**, and **30 seconds** long. At the length limit the recording stops by itself and a
 message tells you so. GIFs have no sound. These limits can be changed in `config.toml`
-(`gif_max_width`, `gif_fps`, `gif_max_seconds`).
+(`gif_max_width`, `gif_fps`, `gif_max_seconds`). Whatever the settings, a GIF also stops, with a
+message, once its frames fill about 1 GB of memory; that only happens with large, long, fast
+GIFs, and a smaller width or frame rate avoids it.
 
 ## 9. Settings
 
@@ -193,7 +195,8 @@ discards them.
   Windows sets this under *Settings → System → Sound → Input*. Note that apps such as Teams or
   Zoom often use the separate "default *communication* device", so the microphone they use may
   not be the one RustShot picks here.
-- **Each connected microphone by name.** Choose one to always record from it.
+- **Each connected microphone by name.** Choose one to always record from it. Two
+  microphones with the same name are shown numbered, "(1)" and "(2)".
 - **A microphone you chose earlier that isn't connected now** stays selected, marked **(not
   connected)**. Until you plug it back in, recordings use the default microphone and say so
   afterwards.

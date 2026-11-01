@@ -209,6 +209,17 @@ verification log at the end (newest first).
 ---
 
 ### Verification log
+- 2026-11-01: Final review of the code written after the last review (independent read of
+  `0c5ea11..c97da2c`). Fixed: Settings OK no longer rewrites `microphone_device` (an id, a
+  partial name, or a name contained in a connected device's were replaced by that device's
+  name); same-name microphones are numbered and stored by id; a combo with no selection keeps
+  the old value; GIF saves latch write errors (the trailer is written in `Drop`, where they
+  were ignored, so a full disk could leave a truncated GIF reported as saved) and map codec-
+  wrapped I/O errors to disk full; GIF frames capped at 1 GiB with a notice. Added: VERSIONINFO
+  resource (checked: FileVersion/ProductVersion/ProductName in the debug exe, icon and manifest
+  still embedded) and the version in the startup log line. Checked, nothing found: RefCell
+  re-entrancy in the tooltip refresh, AttachThreadInput pairing, combo constants and layout,
+  disk-full HRESULTs, `schema_version` sanitize. Gate green, **179 tests**.
 - 2026-10-23: Documentation pass for 0.1.7. New `MANUAL-GUIDE.md` and `MANUAL-GUIDE.vi.md`
   (install, first start, each task step by step, Settings field by field, shortcuts,
   `config.toml`-only options, file locations, troubleshooting, update, uninstall), checked

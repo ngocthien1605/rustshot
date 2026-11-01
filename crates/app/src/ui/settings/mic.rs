@@ -18,6 +18,12 @@ pub(super) struct MicChoice {
 /// one), then every connected microphone by name. A configured microphone that is not
 /// connected right now is kept as an entry marked "not connected" and selected, so pressing OK
 /// doesn't silently switch it to another device.
+///
+/// The entry a configured value selects stores that value as it was written, not the device's
+/// current name: OK without touching the list leaves `microphone_device` exactly as it was (an
+/// endpoint id stays an id, and "USB Mic" stays "USB Mic" while only "USB Mic 2" is plugged in,
+/// so the original device is used again once it is back). Devices that share a name are
+/// numbered and store their endpoint id, the only value that tells them apart.
 pub(super) fn mic_choices(
     inputs: &[recorder::AudioInput],
     configured: Option<&str>,
@@ -33,18 +39,39 @@ pub(super) fn mic_choices(
         },
         value: None,
     }];
-    choices.extend(inputs.iter().map(|i| MicChoice {
-        label: i.name.clone(),
-        value: Some(i.name.clone()),
+    let same_name = |n: &str| {
+        inputs
+            .iter()
+            .filter(|j| j.name.eq_ignore_ascii_case(n))
+            .count()
+    };
+    let mut seen: Vec<String> = Vec::new();
+    choices.extend(inputs.iter().map(|i| {
+        if same_name(&i.name) > 1 {
+            seen.push(i.name.to_lowercase());
+            let k = seen.iter().filter(|n| **n == i.name.to_lowercase()).count();
+            MicChoice {
+                label: format!("{} ({k})", i.name),
+                value: Some(i.id.clone()),
+            }
+        } else {
+            MicChoice {
+                label: i.name.clone(),
+                value: Some(i.name.clone()),
+            }
+        }
     }));
-    let wanted = configured.map(str::trim).filter(|w| !w.is_empty());
+    let wanted = configured.filter(|w| !w.trim().is_empty());
     let selected = match wanted {
         None => 0,
         Some(w) => match recorder::find_input(inputs, w) {
-            Some(i) => i + 1,
+            Some(i) => {
+                choices[i + 1].value = Some(w.to_string());
+                i + 1
+            }
             None => {
                 choices.push(MicChoice {
-                    label: format!("{w} (not connected)"),
+                    label: format!("{} (not connected)", w.trim()),
                     value: Some(w.to_string()),
                 });
                 choices.len() - 1
@@ -84,14 +111,19 @@ pub(super) fn populate_mics(hwnd: HWND, configured: Option<&str>) -> Vec<MicChoi
     choices
 }
 
-/// The `microphone_device` value for the drop-down's current selection.
-pub(super) fn selected_mic(hwnd: HWND, choices: &[MicChoice]) -> Option<String> {
+/// The `microphone_device` value for the drop-down's current selection, or `initial` (the value
+/// the dialog opened with) if the combo reports no selection.
+pub(super) fn selected_mic(
+    hwnd: HWND,
+    choices: &[MicChoice],
+    initial: Option<&str>,
+) -> Option<String> {
     // SAFETY: plain query to our own combo box.
     let i = unsafe { SendDlgItemMessageW(hwnd, COMBO_MIC, CB_GETCURSEL, WPARAM(0), LPARAM(0)) };
-    usize::try_from(i.0)
-        .ok()
-        .and_then(|i| choices.get(i))
-        .and_then(|c| c.value.clone())
+    match usize::try_from(i.0).ok().and_then(|i| choices.get(i)) {
+        Some(c) => c.value.clone(),
+        None => initial.map(str::to_string),
+    }
 }
 
 /// The picker only matters while "Record microphone" is ticked; grey it out otherwise.
@@ -140,11 +172,56 @@ mod tests {
     #[test]
     fn configured_microphone_is_selected_by_the_recording_rule() {
         let inputs = [input("a", "Mic Array", true), input("b", "USB Mic", false)];
-        // Part of a name selects that device, as a recording would.
+        // Part of a name selects that device, as a recording would, and the entry keeps the
+        // value as written, so OK without a change leaves the config alone.
         let (c, sel) = mic_choices(&inputs, Some("usb"));
         assert_eq!(sel, 2);
-        assert_eq!(c[sel].value.as_deref(), Some("USB Mic"));
+        assert_eq!(c[sel].value.as_deref(), Some("usb"));
         assert_eq!(c.len(), 3, "no extra entry for a connected device");
+        // An endpoint id stays an id.
+        let (c, sel) = mic_choices(&inputs, Some("b"));
+        assert_eq!((sel, c[sel].value.as_deref()), (2, Some("b")));
+    }
+
+    #[test]
+    fn a_name_contained_in_a_connected_device_is_kept_as_written() {
+        // "USB Mic" is unplugged; "USB Mic 2" matches it by substring and is what a recording
+        // would use now, but OK must not rewrite the config to "USB Mic 2".
+        let inputs = [
+            input("a", "Mic Array", true),
+            input("c", "USB Mic 2", false),
+        ];
+        let (c, sel) = mic_choices(&inputs, Some("USB Mic"));
+        assert_eq!(
+            (labels(&c)[sel], c[sel].value.as_deref()),
+            ("USB Mic 2", Some("USB Mic"))
+        );
+        // Choosing it on purpose from a fresh list stores its own name.
+        let (c, _) = mic_choices(&inputs, None);
+        assert_eq!(c[2].value.as_deref(), Some("USB Mic 2"));
+    }
+
+    #[test]
+    fn devices_sharing_a_name_are_numbered_and_stored_by_id() {
+        let inputs = [
+            input("a", "Headset Mic", true),
+            input("b", "headset mic", false),
+            input("c", "USB Mic", false),
+        ];
+        let (c, _) = mic_choices(&inputs, None);
+        assert_eq!(
+            labels(&c),
+            [
+                "System default (Headset Mic)",
+                "Headset Mic (1)",
+                "headset mic (2)",
+                "USB Mic"
+            ]
+        );
+        let values: Vec<_> = c.iter().map(|c| c.value.as_deref()).collect();
+        assert_eq!(values, [None, Some("a"), Some("b"), Some("USB Mic")]);
+        // The stored id selects the second one again.
+        assert_eq!(mic_choices(&inputs, Some("b")).1, 2);
     }
 
     #[test]
