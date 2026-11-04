@@ -6,7 +6,7 @@ Tài liệu này hướng dẫn dùng RustShot theo từng việc: cài đặt, 
 video và GIF, thay đổi cài đặt. Bản tra cứu ngắn gọn (mọi khoá trong `config.toml`, danh sách
 đầy đủ tên phím) nằm trong [User Guide](USER-GUIDE.md) (tiếng Anh).
 
-Áp dụng cho **RustShot 0.1.8**. Tên nút và menu trong RustShot là tiếng Anh nên được giữ
+Áp dụng cho **RustShot 0.1.9**. Tên nút và menu trong RustShot là tiếng Anh nên được giữ
 nguyên trong tài liệu này.
 
 ---
@@ -31,7 +31,7 @@ RustShot là bản portable: không có trình cài đặt, không cần quyền
 1. Mở [trang Releases](https://github.com/ngocthien1605/rustshot/releases) và tải file
    `RustShot-<phiên bản>-portable-x64.zip` của bản mới nhất.
 2. *(Không bắt buộc)* Kiểm tra file tải về: cạnh file zip có file `.sha256` chứa mã SHA-256.
-   Trong PowerShell, lệnh `Get-FileHash .\RustShot-0.1.8-portable-x64.zip` phải in ra đúng mã đó
+   Trong PowerShell, lệnh `Get-FileHash .\RustShot-0.1.9-portable-x64.zip` phải in ra đúng mã đó
    (chữ hoa hay chữ thường không quan trọng).
 3. Giải nén vào một thư mục cố định, ví dụ `%LOCALAPPDATA%\Programs\RustShot`. Trong zip có
    `rustshot.exe`, tài liệu này (`MANUAL-GUIDE.vi.md`, bản tiếng Anh `MANUAL-GUIDE.md`), bản tra

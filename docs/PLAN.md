@@ -4,12 +4,13 @@ A lightweight, tray-resident Windows app that does exactly two things: **take sc
 and **record the screen**. Clean-room build inspired by Screenpresso 2.3.10.0 (capabilities,
 not code/assets). See `../RustShot-MASTER-PROMPT.md` for the authoritative spec.
 
-## Status (2026-11-01, release 0.1.8)
+## Status (2026-11-04, release 0.1.9)
 
 All phases M0–M7 are done; [PROGRESS.md](PROGRESS.md) has the per-phase evidence and the
 verification log. After M7 came a review pass (items 1–7: busy gate and teardown, config
 recovery and error dialogs, capture-stream failures, audio, CI and releases, the medium
-findings, the app crate split) and the Settings microphone picker and the final-review fixes. The latest release is 0.1.8,
+findings, the app crate split), the Settings microphone picker, the final-review fixes, and the
+annotation tools (pixelate, arrow, highlight, palette, line widths, redo). The latest release is 0.1.9,
 published on GitHub with the earlier ones. What is still open:
 
 - **Manual hardware checks** that need a person or devices (Bluetooth microphone through the
