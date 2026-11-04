@@ -44,7 +44,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use crate::platform::gdi::{ScreenDc, Surface};
 
 use super::model::{
-    enter_action, font_px, Editor, EnterAction, EscapeResult, Item, Tool, Typing, View,
+    apply_pixel_layer, enter_action, font_px, Editor, EnterAction, EscapeResult, Item, Tool,
+    Typing, View,
 };
 
 const CLASS_NAME: PCWSTR = w!("RustShotAnnotate");
@@ -651,6 +652,8 @@ fn paint_items(
                     outline(*rect);
                     draw_text(hdc, *rect, text, view);
                 }
+                // Pixel items are already in the pixels (`apply_pixel_layer`), not drawn here.
+                Item::Pixelate(_) => {}
             }
         }
         if let Some(r) = preview {
@@ -740,9 +743,11 @@ fn make_source_dc(img: &Rgba) -> Result<Surface> {
     Ok(surface)
 }
 
-/// Render `items` onto a copy of `img` at full resolution (what Save/Copy produce).
+/// Render `items` onto a copy of `img` at full resolution (what Save/Copy produce): the pixel
+/// items (pixelate) change the pixels first, then the outlines and text are drawn on top. The
+/// redacted pixels are what gets encoded — the original detail is not in the output at all.
 pub fn render(img: &Rgba, items: &[Item]) -> Result<Rgba> {
-    let surface = make_source_dc(img)?;
+    let surface = make_source_dc(&apply_pixel_layer(img, items))?;
     // SAFETY: draw into our DIB-backed DC, then flush GDI so the pixels are complete.
     unsafe {
         paint_items(surface.dc, items, None, None, View::IDENTITY);
@@ -987,6 +992,39 @@ mod tests {
         assert_eq!((out.width(), out.height()), (64, 48));
         assert_eq!(px(&out, 30, 24), [10, 20, 30, 255], "untouched pixel kept");
         assert!(out.pixels().all(|p| p.0[3] == 255), "all pixels opaque");
+    }
+
+    #[test]
+    fn pixelate_is_in_the_exported_pixels_under_the_outlines() {
+        // A checkerboard: any surviving detail shows up as unequal neighbours.
+        let (w, h) = (48u32, 48u32);
+        let mut raw = Vec::new();
+        for y in 0..h {
+            for x in 0..w {
+                let v = if (x + y) % 2 == 0 { 0 } else { 250 };
+                raw.extend_from_slice(&[v, v, v, 255]);
+            }
+        }
+        let src = Rgba::from_raw(w, h, raw).unwrap();
+        let out = render(
+            &src,
+            &[
+                Item::Pixelate(Rect::new(0, 0, 24, 24)),
+                Item::Rect(Rect::new(30, 30, 12, 12)),
+            ],
+        )
+        .unwrap();
+        // The redacted square is flat (the checkerboard is gone)...
+        let first = px(&out, 0, 0);
+        for y in 0..24 {
+            for x in 0..24 {
+                assert_eq!(px(&out, x, y), first, "({x},{y}) kept detail");
+            }
+        }
+        assert_eq!(first, [125, 125, 125, 255]);
+        // ...outside it the source is intact, and the outline is still drawn in red.
+        assert_eq!(px(&out, 26, 2), px(&src, 26, 2));
+        assert_eq!(px(&out, 31, 36), [255, 0, 0, 255]);
     }
 
     #[test]

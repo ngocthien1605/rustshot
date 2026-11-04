@@ -3,11 +3,20 @@
 //! in [`super::win`] only forwards input and paints.
 //!
 //! All coordinates in the model are **image pixels** (top-left origin).
+//!
+//! Items come in two layers. *Pixel* items ([`Item::Pixelate`]) change the screenshot's pixels
+//! themselves ([`apply_pixel_layer`]); the window then draws the *vector* items (outlines, text)
+//! on top. Save and Copy export both layers, so a redaction is part of the file, not an overlay
+//! that could be lifted off.
 
 use capture_core::{Point, Rect};
+use imaging::Rgba;
 
 /// A drag must cover at least this many image pixels on both axes to count as a shape.
 pub const MIN_SIZE: i32 = 6;
+
+/// Pixelate block size in image pixels: large enough that text inside a block is not legible.
+pub const PIXELATE_BLOCK: u32 = 12;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tool {
@@ -15,13 +24,22 @@ pub enum Tool {
     Rect,
     /// Draw a red rectangle, then type text inside it.
     Text,
+    /// Drag a rectangle whose pixels are pixelated (irreversibly) in the saved/copied image.
+    // Not reachable from the toolbar until the window wires the new tools in.
+    #[allow(dead_code)]
+    Pixelate,
 }
 
 /// A committed annotation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Item {
     Rect(Rect),
-    Text { rect: Rect, text: String },
+    Text {
+        rect: Rect,
+        text: String,
+    },
+    /// A redacted area: pixelated in [`PIXELATE_BLOCK`] squares by [`apply_pixel_layer`].
+    Pixelate(Rect),
 }
 
 /// A text box that has been drawn and is currently being typed into.
@@ -105,8 +123,8 @@ impl Editor {
         }
     }
 
-    /// Finish the drag. A big-enough rectangle is committed (Rect tool) or turned into a text
-    /// box awaiting typing (Text tool); a tiny one — an accidental click — is discarded.
+    /// Finish the drag. A big-enough rectangle is committed (Rect, Pixelate) or turned into a
+    /// text box awaiting typing (Text tool); a tiny one — an accidental click — is discarded.
     pub fn on_up(&mut self, p: Point) {
         self.on_move(p);
         let Some((a, b)) = self.drag.take() else {
@@ -118,6 +136,7 @@ impl Editor {
         }
         match self.tool {
             Tool::Rect => self.items.push(Item::Rect(r)),
+            Tool::Pixelate => self.items.push(Item::Pixelate(r)),
             Tool::Text => {
                 self.typing = Some(Typing {
                     rect: r,
@@ -196,6 +215,19 @@ impl Editor {
         let (y0, y1) = (a.y.min(b.y), a.y.max(b.y));
         Rect::new(x0, y0, x1 - x0, y1 - y0)
     }
+}
+
+/// The screenshot with the pixel items of `items` applied in order (each pixelate sees the
+/// result of the ones before it). Vector items are ignored: the window draws them on top. Pure,
+/// so the redaction that Save and Copy export is unit-tested here.
+pub fn apply_pixel_layer(img: &Rgba, items: &[Item]) -> Rgba {
+    let mut out = img.clone();
+    for item in items {
+        if let Item::Pixelate(r) = item {
+            imaging::pixelate_in_place(&mut out, *r, PIXELATE_BLOCK);
+        }
+    }
+    out
 }
 
 /// What pressing Enter does while typing in a text box.
@@ -512,5 +544,84 @@ mod tests {
         let p = Point::new(800, 600);
         let back = v.to_image(v.to_view(p).x, v.to_view(p).y);
         assert!((back.x - p.x).abs() <= 2 && (back.y - p.y).abs() <= 2);
+    }
+
+    #[test]
+    fn pixelate_tool_commits_a_normalized_clamped_area() {
+        let mut e = Editor::new(200, 100);
+        e.set_tool(Tool::Pixelate);
+        drag(&mut e, (150, 90), (-20, 30));
+        assert_eq!(e.items(), &[Item::Pixelate(Rect::new(0, 30, 150, 60))]);
+    }
+
+    #[test]
+    fn pixelate_tool_follows_the_min_size_rule_and_undo() {
+        let mut e = Editor::new(200, 100);
+        e.set_tool(Tool::Pixelate);
+        drag(&mut e, (10, 10), (10 + MIN_SIZE - 1, 80)); // too narrow
+        assert!(e.items().is_empty());
+        drag(&mut e, (10, 10), (10 + MIN_SIZE, 10 + MIN_SIZE));
+        assert_eq!(e.items().len(), 1);
+        e.undo();
+        assert!(e.items().is_empty());
+    }
+
+    /// A `w × h` image in which every pixel differs from its neighbours.
+    fn detailed(w: u32, h: u32) -> Rgba {
+        let mut raw = Vec::with_capacity((w * h * 4) as usize);
+        for y in 0..h {
+            for x in 0..w {
+                raw.extend_from_slice(&[
+                    (x * 9) as u8,
+                    (y * 13) as u8,
+                    ((x * 31 + y * 7) % 251) as u8,
+                    255,
+                ]);
+            }
+        }
+        Rgba::from_raw(w, h, raw).unwrap()
+    }
+
+    #[test]
+    fn pixel_layer_redacts_pixelate_areas_and_nothing_else() {
+        let src = detailed(60, 40);
+        let area = Rect::new(0, 0, 24, 24);
+        let items = [
+            Item::Rect(Rect::new(30, 5, 20, 20)),
+            Item::Pixelate(area),
+            Item::Text {
+                rect: Rect::new(30, 25, 25, 10),
+                text: "x".into(),
+            },
+        ];
+        let out = apply_pixel_layer(&src, &items);
+        // Each PIXELATE_BLOCK square inside the area is one colour...
+        let b = PIXELATE_BLOCK;
+        for (bx, by) in [(0, 0), (b, 0), (0, b), (b, b)] {
+            let first = out.get_pixel(bx, by);
+            for y in by..by + b {
+                for x in bx..bx + b {
+                    assert_eq!(out.get_pixel(x, y), first, "({x},{y})");
+                }
+            }
+        }
+        // ...and everything outside it, including under the vector items, is the source.
+        for y in 0..40 {
+            for x in 0..60 {
+                if x >= 24 || y >= 24 {
+                    assert_eq!(out.get_pixel(x, y), src.get_pixel(x, y), "({x},{y})");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn pixel_layer_without_pixel_items_is_the_source() {
+        let src = detailed(20, 10);
+        assert_eq!(apply_pixel_layer(&src, &[]), src);
+        assert_eq!(
+            apply_pixel_layer(&src, &[Item::Rect(Rect::new(1, 1, 8, 8))]),
+            src
+        );
     }
 }
