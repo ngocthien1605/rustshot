@@ -2,24 +2,21 @@
 
 Status legend: ✅ done & verified · 🟡 in progress · ⬜ not started · 🔬 manual-QA only (GPU/UI)
 
-## Current status (2026-11-01, release 0.1.8)
+## Current status (2026-11-04, release 0.1.9)
 
-- **Shipped:** v0.1.8 on GitHub (portable zip + `.sha256`, built by the release workflow).
-  Every phase M0–M7 is done, followed by review items 1–7, the Settings microphone picker and
-  the final-review fixes.
-- **Gate:** fmt, clippy `-D warnings`, build and **179 tests** green with `--locked`;
-  `cargo deny check` ok; CI green on `master`, MSRV 1.90 checked.
-- **Open:** the manual hardware checks still to run (QA-CHECKLIST; Bluetooth mic through the
-  picker, device unplug, read-back throttle, tray tooltip, run at startup, display unplug, GPU
-  reset, a full 3-minute A/V sync), and the deferred items: code signing, an MSI that is
-  actually built and tested, a capture history list.
+- **Shipped:** v0.1.9 on GitHub (portable zip + `.sha256`, built by the release workflow).
+  Every phase M0–M7 is done, followed by review items 1–7, the Settings microphone picker, the
+  final-review fixes and the annotation tools (pixelate redaction, arrow, translucent highlight,
+  six-colour palette, three line widths, redo).
+- **Gate:** fmt, clippy `-D warnings`, build and **228 tests** green with `--locked` on CI
+  (Windows); `cargo deny check` ok; MSRV 1.90 checked.
+- **Open:** the annotation editor's toolbar, shortcuts and previews have not been used by a
+  person yet (QA-CHECKLIST, "Annotation tools"); the manual hardware checks still to run
+  (Bluetooth mic through the picker, device unplug, read-back throttle, tray tooltip, run at
+  startup, display unplug, GPU reset, a full 3-minute A/V sync); and the deferred items: code
+  signing, an MSI that is actually built and tested, a capture history list.
 - **Docs:** step-by-step Manual Guide in English and Vietnamese (`MANUAL-GUIDE.md`,
   `MANUAL-GUIDE.vi.md`) next to the reference `USER-GUIDE.md`; all three ship in the zip.
-- **In review (unreleased):** annotation tools — pixelate redaction, arrow, translucent
-  highlight, six-colour palette, three line widths, redo. Pixel operations and editor model
-  tested; **the editor window wiring is unverified** (written on Linux, type-checked for Windows
-  only). 228 tests by count (+49), not all run yet — see the log entry of 2026-11-04 and the
-  QA-CHECKLIST section "Annotation tools".
 
 The milestone sections below record each phase as it was finished; later changes are in the
 verification log at the end (newest first).
@@ -215,6 +212,10 @@ verification log at the end (newest first).
 ---
 
 ### Verification log
+- 2026-11-04: **Release 0.1.9** (tag `v0.1.9`): the annotation tools. CI on the merged branch
+  (windows-latest) ran what the Linux VM could not: all 228 tests including the 14 GDI render
+  tests in `annotate/win.rs`, the Windows branch of the config path test, `cargo deny check`,
+  and the portable zip build. The editor UI itself is still to be tried by hand.
 - 2026-11-04: **Annotation tools** (branch, four commits): `imaging::pixelate` /
   `blend_rect` (pure, clamped, irreversible block mean), editor model `Tool::{Arrow, Highlight,
   Pixelate}`, `apply_pixel_layer`, `arrow_geometry`, palette / thickness / per-tool style, redo,

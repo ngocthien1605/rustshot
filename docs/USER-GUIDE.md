@@ -7,7 +7,7 @@ animated GIFs with optional audio.
 This is the compact reference. For a step-by-step walkthrough (installing, each task, updating,
 uninstalling) see the Manual Guide, in [English](MANUAL-GUIDE.md) or [Vietnamese](MANUAL-GUIDE.vi.md) (next
 to this file, in the zip and in the repository's `docs` folder). This guide describes
-RustShot 0.1.8.
+RustShot 0.1.9.
 
 ## Getting started
 
