@@ -55,20 +55,33 @@ is shown during the wait.
 
 ### Annotating a screenshot
 
-Click **Annotate** in the flyout to open the screenshot in RustShot's editor. It has two tools,
-both in red, chosen from the toolbar:
+Click **Annotate** in the flyout to open the screenshot in RustShot's editor. Its tools, chosen
+from the toolbar or with a letter key:
 
-- **Rectangle** — drag on the image to draw a red rectangle.
-- **Text** — drag to draw a red box, then just type; **Enter** saves the text into the box.
+- **Rectangle** (`R`) — drag on the image to draw a rectangle outline.
+- **Text** (`T`) — drag to draw a box, then just type; **Enter** saves the text into the box.
   **Shift+Enter** or **Alt+Enter** starts a new line instead of saving.
   `Backspace` edits while typing, `Esc` throws the text away, and clicking elsewhere also saves it.
-  The mouse cursor over the image is a red crosshair.
+- **Arrow** (`A`) — drag from the tail; the head is drawn where you release.
+- **Highlight** (`H`) — a see-through box (40 % colour) over text you want to point out.
+- **Pixelate** (`P`) — redacts an area: each 12 × 12-px block becomes its average colour in the
+  saved and copied image (the detail is gone from that file, not hidden under an overlay). The
+  original screenshot is not changed, so share the `…_annotated` copy.
 
-Other controls: **Undo** (`Ctrl+Z`) removes the last annotation (or cancels the one you're drawing);
-**Save** (`Ctrl+S`) writes a copy next to the original as `…_annotated.png` — your original is
-never overwritten, and saving again creates `…_annotated_2.png`; **Copy** (`Ctrl+C`) puts the
-annotated image on the clipboard. Closing the editor with unsaved annotations asks whether to
-save first. Annotations are drawn at the screenshot's full resolution, whatever the window size.
+The mouse cursor over the image is a red crosshair. **Colour** (six swatches, keys `1`–`6`: red,
+yellow, green, blue, black, white) and **line** (thin 2 px, medium 3 px, thick 6 px; `[` / `]`)
+apply to the current tool, and each tool remembers its own: red and medium by default, yellow for
+Highlight. Highlight and pixelate change the pixels, so they always sit under outlines, arrows and
+text. The single-key shortcuts act only while no text box is being typed in, and follow the typed
+character (with an East Asian IME on, switch it to direct input).
+
+Other controls: **Undo** (`Ctrl+Z`) removes the last annotation (or cancels the one you're
+drawing); **Redo** (`Ctrl+Y` or `Ctrl+Shift+Z`) restores what undo removed, until you draw
+something new; **Save** (`Ctrl+S`) writes a copy next to the original as `…_annotated.png` — your
+original is never overwritten, and saving again creates `…_annotated_2.png`; **Copy** (`Ctrl+C`)
+puts the annotated image on the clipboard. Closing the editor with unsaved annotations asks
+whether to save first. Annotations are drawn at the screenshot's full resolution, whatever the
+window size.
 
 ## Recording
 

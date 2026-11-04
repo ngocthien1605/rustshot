@@ -15,6 +15,11 @@ Status legend: ✅ done & verified · 🟡 in progress · ⬜ not started · �
   actually built and tested, a capture history list.
 - **Docs:** step-by-step Manual Guide in English and Vietnamese (`MANUAL-GUIDE.md`,
   `MANUAL-GUIDE.vi.md`) next to the reference `USER-GUIDE.md`; all three ship in the zip.
+- **In review (unreleased):** annotation tools — pixelate redaction, arrow, translucent
+  highlight, six-colour palette, three line widths, redo. Pixel operations and editor model
+  tested; **the editor window wiring is unverified** (written on Linux, type-checked for Windows
+  only). 228 tests by count (+49), not all run yet — see the log entry of 2026-11-04 and the
+  QA-CHECKLIST section "Annotation tools".
 
 The milestone sections below record each phase as it was finished; later changes are in the
 verification log at the end (newest first).
@@ -210,6 +215,25 @@ verification log at the end (newest first).
 ---
 
 ### Verification log
+- 2026-11-04: **Annotation tools** (branch, four commits): `imaging::pixelate` /
+  `blend_rect` (pure, clamped, irreversible block mean), editor model `Tool::{Arrow, Highlight,
+  Pixelate}`, `apply_pixel_layer`, `arrow_geometry`, palette / thickness / per-tool style, redo,
+  `shortcut`; window: 18-button toolbar (owner-drawn swatches and line samples), keys, live
+  previews, canvas rebuilt from the pixel layer, `render` exports both layers; unsaved-work
+  check fixed for text committed by clicking away. Done on a Linux VM with the pinned 1.98.1
+  toolchain (it downloaded fine), which cannot build or run the Windows app.
+  **Run here:** `cargo fmt --check`; `cargo clippy -D warnings` for `imaging`, `config`,
+  `capture-core` (Linux) and for the whole workspace with `--all-targets --target
+  x86_64-pc-windows-msvc` (so the app and its tests type-check and lint clean);
+  `cargo check --workspace --target x86_64-pc-windows-msvc --locked`; `cargo test -p imaging`
+  (31 pass; the 32nd is Windows-only); the editor model's 50 tests through a scratch crate that
+  `#[path]`-includes `model.rs` (the app crate needs GTK and Win32 to build on Linux).
+  `cargo test -p config`: 29 pass, `sanitize_resets_relative_output_folder` fails — it asserts
+  `C:\shots` is absolute, which is only true on Windows; pre-existing, unrelated, unchanged.
+  **Not run:** `cargo build` / `cargo test` of the app crate (no MSVC linker or Windows SDK), so
+  the 14 GDI render tests in `annotate/win.rs` (8 new: pixelate, arrow, highlight, colours and
+  widths, toolbar ids/layout) were compiled but never executed; `cargo deny check`; the editor UI
+  itself. Lockfile unchanged (no new dependencies).
 - 2026-11-01: **Release 0.1.8** (tag `v0.1.8`): the final-review fixes (microphone setting kept
   as written, same-name microphones, GIF write errors and memory cap), version info in the exe
   and the startup log, and the Manual Guide (English + Vietnamese) in the portable zip.

@@ -358,3 +358,57 @@ Every non-obvious choice + a one-line rationale. Newest at top within each phase
   walkthrough, with a Vietnamese translation, `MANUAL-GUIDE.vi.md`, for the first users. Both
   keep RustShot's on-screen labels in English, exactly as the app shows them, so a reader can
   find each button. A UI change updates all three files.
+
+## After 0.1.8 — annotation tools
+
+- **Two layers: pixels, then vectors.** Highlight and pixelate change the screenshot's pixels
+  (`model::apply_pixel_layer`, in the order they were drawn); rectangles, arrows and text are
+  drawn with GDI on top (`win::paint_items`). Save and Copy both go through `render`, which
+  encodes the result, so a redaction is in the exported pixels, not an overlay that a viewer or
+  editor could lift off. Consequences, accepted: a pixelate never blurs your own arrow or text
+  (they are always above), and a highlight never tints them. The canvas shows the same pixel
+  layer: the source surface is rebuilt from `apply_pixel_layer` whenever the set of pixel items
+  changes (draw, undo, redo), which costs one image copy per change, not per paint.
+- **Pixelate = block mean, 12-px blocks, pure function in `imaging`.** Each square becomes its
+  rounded mean, so every input with the same block means gives the same output (a many-to-one
+  map: there is nothing to invert). Blocks under 2 px are raised to 2 (1 px would be a no-op
+  passing for a redaction), and a leftover strip at the right/bottom edge narrower than half a
+  block joins the previous block instead of being averaged on its own, where a 1-px sliver would
+  keep a column of detail. Known limit, documented for users: pixelation of *large* text or a
+  well-known logo can stay recognisable by shape, and dictionary attacks on pixelated text exist
+  when blocks are small relative to the glyphs; 12 px is larger than the stroke height of normal
+  UI text at 100–150 %. A solid fill would be stronger; the request was pixelate, so that is a
+  possible later tool. The original screenshot is untouched (as for every annotation); the
+  guides say to share the `_annotated` copy.
+- **Highlight = alpha blend at 40 %, not multiply.** Multiply is the "real highlighter" look but
+  makes black a solid fill and white a no-op; a plain blend keeps every palette colour
+  translucent. The drag preview uses GDI `AlphaBlend` with the same constant alpha; after
+  release the blended pixels come from `imaging::blend_rect`, the same as the export.
+- **Arrow geometry is pure** (`model::arrow_geometry`): head 4.5 × line width, at least 14 px,
+  at most half the arrow; barbs ±~27°; the shaft stops at the base of the filled head so a thick
+  line's cap never pokes past the point. `MIN_SIZE` for an arrow is a length, since a level arrow
+  has zero height.
+- **Fixed palette and three widths; per-tool style.** Six colours (red, yellow, green, blue,
+  black, white) and thin/medium/thick = 2/3/6 px. Medium is the editor's old 3 px and red the
+  old colour, so a user who never touches the new controls gets exactly the 0.1.8 output. Each
+  tool remembers its own style (the highlighter starts yellow); every item stores the style it
+  was drawn with. Choosing a colour while typing restyles the open text box.
+- **Redo is a stack cleared by any new item** (including committing text), and it waits while a
+  shape or text box is in progress; undo of an in-progress shape only cancels it and leaves the
+  redo stack alone.
+- **Unsaved = items differ from the last save** (`Ctx::dirty`), not a flag kept up to date by
+  hand. The flag missed one path: clicking away from a text box commits it, and that never set
+  it, so closing the editor dropped the text without asking. An editor emptied by undo has
+  nothing to save and does not ask.
+- **One-key shortcuts come from `WM_CHAR`, not key codes** (`model::shortcut`): `R T A H P`,
+  `1`–`6`, `[ ]` then work on any layout (JIS included), and they are ignored while typing so
+  they cannot steal text. An IME in composition mode receives them instead; the guides say so.
+- **Owner-drawn swatches and line samples.** A text label cannot show a colour; the buttons keep
+  names as window text for screen readers. Updating them (`EnableWindow`, `CheckRadioButton`)
+  can repaint synchronously and re-enter the window procedure with `WM_DRAWITEM`, so
+  `sync_toolbar` finishes with the state before touching the buttons and is the last use of the
+  state in each handler.
+- **Verification boundary.** Written on Linux: `imaging` and the editor model (run through a
+  scratch crate that includes `model.rs`, since the app crate does not build there) are tested;
+  the window code is type-checked and linted for `x86_64-pc-windows-msvc` only. The QA checklist
+  has the manual steps.

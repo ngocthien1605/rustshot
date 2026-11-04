@@ -57,17 +57,6 @@ impl Color {
             Color::White => [255, 255, 255],
         }
     }
-
-    pub fn name(self) -> &'static str {
-        match self {
-            Color::Red => "Red",
-            Color::Yellow => "Yellow",
-            Color::Green => "Green",
-            Color::Blue => "Blue",
-            Color::Black => "Black",
-            Color::White => "White",
-        }
-    }
 }
 
 /// Line thickness of outlines, arrows and text-box borders.
@@ -197,6 +186,42 @@ pub enum Item {
     Pixelate(Rect),
 }
 
+impl Item {
+    /// True for items that change the screenshot's pixels (drawn below everything else).
+    pub fn is_pixel(&self) -> bool {
+        matches!(self, Item::Highlight(..) | Item::Pixelate(_))
+    }
+}
+
+/// A one-key shortcut, available while no text box is being typed into (then keys are text).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Shortcut {
+    Tool(Tool),
+    Color(Color),
+    Thinner,
+    Thicker,
+}
+
+/// The shortcut for a typed character: `R` `T` `A` `H` `P` pick a tool, `1`–`6` a colour,
+/// `[` / `]` step the thickness. Case-insensitive. Characters (not key codes) are matched, so
+/// the keys work the same on any keyboard layout.
+pub fn shortcut(c: char) -> Option<Shortcut> {
+    Some(match c.to_ascii_lowercase() {
+        'r' => Shortcut::Tool(Tool::Rect),
+        't' => Shortcut::Tool(Tool::Text),
+        'a' => Shortcut::Tool(Tool::Arrow),
+        'h' => Shortcut::Tool(Tool::Highlight),
+        'p' => Shortcut::Tool(Tool::Pixelate),
+        '[' => Shortcut::Thinner,
+        ']' => Shortcut::Thicker,
+        d @ '1'..='6' => {
+            let i = d as usize - '1' as usize;
+            Shortcut::Color(*Color::PALETTE.get(i)?)
+        }
+        _ => return None,
+    })
+}
+
 /// A text box that has been drawn and is currently being typed into.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Typing {
@@ -242,7 +267,6 @@ impl Editor {
         }
     }
 
-    #[cfg(test)]
     pub fn tool(&self) -> Tool {
         self.tool
     }
@@ -282,6 +306,7 @@ impl Editor {
     }
 
     /// The rectangle being rubber-banded right now, if any.
+    #[cfg(test)]
     pub fn drag_rect(&self) -> Option<Rect> {
         self.drag.map(|(a, b)| self.normalized(a, b))
     }
@@ -329,6 +354,25 @@ impl Editor {
     /// Finish the drag. A big-enough shape is committed (or, for the Text tool, becomes a text
     /// box awaiting typing); a tiny one — an accidental click — is discarded. Boxes need
     /// [`MIN_SIZE`] on both axes, an arrow needs that length (a level arrow has no height).
+    pub fn is_dragging(&self) -> bool {
+        self.drag.is_some()
+    }
+
+    /// Apply a one-key [`Shortcut`]. Returns false (and does nothing) while typing, when the key
+    /// belongs to the text.
+    pub fn apply_shortcut(&mut self, sc: Shortcut) -> bool {
+        if self.is_typing() {
+            return false;
+        }
+        match sc {
+            Shortcut::Tool(t) => self.set_tool(t),
+            Shortcut::Color(c) => self.set_color(c),
+            Shortcut::Thinner => self.set_thickness(self.style().thickness.thinner()),
+            Shortcut::Thicker => self.set_thickness(self.style().thickness.thicker()),
+        }
+        true
+    }
+
     pub fn on_up(&mut self, p: Point) {
         self.on_move(p);
         let Some((a, b)) = self.drag.take() else {
@@ -1159,14 +1203,13 @@ mod tests {
     }
 
     #[test]
-    fn palette_is_six_distinct_named_colours() {
+    fn palette_is_six_distinct_colours() {
         let p = Color::PALETTE;
         assert_eq!(p.len(), 6);
         assert_eq!(p[0], Color::Red, "red first: key 1 and the default");
         for (i, a) in p.iter().enumerate() {
             for b in &p[i + 1..] {
                 assert_ne!(a.rgb(), b.rgb());
-                assert_ne!(a.name(), b.name());
             }
         }
     }
@@ -1334,5 +1377,77 @@ mod tests {
         assert!(e.items().is_empty());
         e.redo();
         assert_eq!(e.items(), &[Item::Pixelate(Rect::new(10, 10, 40, 40))]);
+    }
+
+    #[test]
+    fn pixel_items_are_highlight_and_pixelate() {
+        let r = Rect::new(0, 0, 9, 9);
+        assert!(Item::Pixelate(r).is_pixel());
+        assert!(Item::Highlight(r, Color::Yellow).is_pixel());
+        assert!(!Item::Rect(r, Style::DEFAULT).is_pixel());
+        let arrow = Item::Arrow {
+            from: Point::new(0, 0),
+            to: Point::new(9, 9),
+            style: Style::DEFAULT,
+        };
+        assert!(!arrow.is_pixel());
+    }
+
+    #[test]
+    fn shortcut_keys_map_to_tools_colours_and_thickness() {
+        assert_eq!(shortcut('r'), Some(Shortcut::Tool(Tool::Rect)));
+        assert_eq!(shortcut('T'), Some(Shortcut::Tool(Tool::Text)));
+        assert_eq!(shortcut('a'), Some(Shortcut::Tool(Tool::Arrow)));
+        assert_eq!(shortcut('h'), Some(Shortcut::Tool(Tool::Highlight)));
+        assert_eq!(shortcut('P'), Some(Shortcut::Tool(Tool::Pixelate)));
+        for (i, c) in ['1', '2', '3', '4', '5', '6'].into_iter().enumerate() {
+            assert_eq!(shortcut(c), Some(Shortcut::Color(Color::PALETTE[i])));
+        }
+        assert_eq!(shortcut('1'), Some(Shortcut::Color(Color::Red)));
+        assert_eq!(shortcut('['), Some(Shortcut::Thinner));
+        assert_eq!(shortcut(']'), Some(Shortcut::Thicker));
+        for c in ['0', '7', 'x', ' ', '\u{1a}', 'ア'] {
+            assert_eq!(shortcut(c), None, "{c:?}");
+        }
+    }
+
+    #[test]
+    fn shortcuts_change_the_editor_but_never_while_typing() {
+        let mut e = Editor::new(200, 100);
+        assert!(e.apply_shortcut(Shortcut::Tool(Tool::Arrow)));
+        assert_eq!(e.tool(), Tool::Arrow);
+        assert!(e.apply_shortcut(Shortcut::Color(Color::Blue)));
+        assert!(e.apply_shortcut(Shortcut::Thicker));
+        assert_eq!(
+            e.style(),
+            Style {
+                color: Color::Blue,
+                thickness: Thickness::Thick
+            }
+        );
+        e.apply_shortcut(Shortcut::Thinner);
+        e.apply_shortcut(Shortcut::Thinner);
+        e.apply_shortcut(Shortcut::Thinner);
+        assert_eq!(e.style().thickness, Thickness::Thin);
+
+        e.apply_shortcut(Shortcut::Tool(Tool::Text));
+        drag(&mut e, (10, 10), (110, 50));
+        assert!(
+            !e.apply_shortcut(Shortcut::Tool(Tool::Rect)),
+            "keys are text now"
+        );
+        assert!(!e.apply_shortcut(Shortcut::Color(Color::Green)));
+        assert_eq!(e.tool(), Tool::Text);
+        assert_eq!(e.typing().unwrap().style, Style::DEFAULT);
+    }
+
+    #[test]
+    fn is_dragging_tracks_the_mouse_button() {
+        let mut e = Editor::new(200, 100);
+        assert!(!e.is_dragging());
+        e.on_down(Point::new(10, 10));
+        assert!(e.is_dragging());
+        e.on_up(Point::new(12, 12));
+        assert!(!e.is_dragging());
     }
 }
