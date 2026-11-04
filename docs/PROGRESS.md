@@ -228,8 +228,9 @@ verification log at the end (newest first).
   `cargo check --workspace --target x86_64-pc-windows-msvc --locked`; `cargo test -p imaging`
   (31 pass; the 32nd is Windows-only); the editor model's 50 tests through a scratch crate that
   `#[path]`-includes `model.rs` (the app crate needs GTK and Win32 to build on Linux).
-  `cargo test -p config`: 29 pass, `sanitize_resets_relative_output_folder` fails — it asserts
-  `C:\shots` is absolute, which is only true on Windows; pre-existing, unrelated, unchanged.
+  `cargo test -p config`: 30 pass. `sanitize_resets_relative_output_folder` used to fail off
+  Windows (it asserted `C:\shots` is absolute); its drive-letter checks now run on Windows only,
+  with a `/shots` equivalent elsewhere.
   **Not run:** `cargo build` / `cargo test` of the app crate (no MSVC linker or Windows SDK), so
   the 14 GDI render tests in `annotate/win.rs` (8 new: pixelate, arrow, highlight, colours and
   widths, toolbar ids/layout) were compiled but never executed; `cargo deny check`; the editor UI
