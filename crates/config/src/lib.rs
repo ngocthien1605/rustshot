@@ -525,13 +525,24 @@ mod tests {
         assert!(s.sanitize());
         assert_eq!(s.output_folder, PathBuf::new());
 
-        // Drive-relative ("C:shots") is relative too; an absolute path is kept.
-        s.output_folder = PathBuf::from("C:shots");
-        assert!(s.sanitize());
-        assert_eq!(s.output_folder, PathBuf::new());
-        s.output_folder = PathBuf::from(r"C:\shots");
-        assert!(!s.sanitize());
-        assert_eq!(s.output_folder, PathBuf::from(r"C:\shots"));
+        // `sanitize` uses the host's path rules (`Path::is_absolute`). The app ships on Windows,
+        // where drive letters matter; elsewhere `C:\shots` is just a relative name.
+        #[cfg(windows)]
+        {
+            // Drive-relative ("C:shots") is relative too; an absolute path is kept.
+            s.output_folder = PathBuf::from("C:shots");
+            assert!(s.sanitize());
+            assert_eq!(s.output_folder, PathBuf::new());
+            s.output_folder = PathBuf::from(r"C:\shots");
+            assert!(!s.sanitize());
+            assert_eq!(s.output_folder, PathBuf::from(r"C:\shots"));
+        }
+        #[cfg(not(windows))]
+        {
+            s.output_folder = PathBuf::from("/shots");
+            assert!(!s.sanitize());
+            assert_eq!(s.output_folder, PathBuf::from("/shots"));
+        }
     }
 
     #[test]

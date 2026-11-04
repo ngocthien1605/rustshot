@@ -1,9 +1,12 @@
 //! The annotation editor window: a normal, resizable top-level window that shows a screenshot
-//! with a small toolbar (Rectangle, Text, Undo, Save, Copy). It runs on the main UI thread's
-//! message loop (like the flyout), so it needs no thread of its own.
+//! with a toolbar (Rectangle, Text, Arrow, Highlight, Pixelate; six colour swatches; three line
+//! thicknesses; Undo, Redo, Save, Copy). It runs on the main UI thread's message loop (like the
+//! flyout), so it needs no thread of its own.
 //!
-//! One GDI routine ([`paint_items`]) draws the annotations both on screen and into the exported
-//! image, so what you see is exactly what gets saved.
+//! What you see is what gets saved: the canvas shows the screenshot with the pixel items
+//! (highlight, pixelate) applied by the same [`apply_pixel_layer`] the export uses, and one GDI
+//! routine ([`paint_items`]) draws the outlines, arrows and text both on screen and into the
+//! exported image.
 
 use std::cell::RefCell;
 use std::ffi::c_void;
@@ -15,36 +18,39 @@ use anyhow::{anyhow, Context, Result};
 use capture_core::{Point, Rect};
 use imaging::Rgba;
 use windows::core::{w, HSTRING, PCWSTR};
-use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, RECT, WPARAM};
+use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
-    BeginPaint, BitBlt, CreateFontW, CreatePen, CreateSolidBrush, DeleteObject, DrawTextW,
-    EndPaint, FillRect, GdiFlush, GetStockObject, IntersectClipRect, InvalidateRect, Rectangle,
+    AlphaBlend, BeginPaint, BitBlt, CreateFontW, CreatePen, CreateSolidBrush, DeleteObject,
+    DrawFocusRect, DrawTextW, EndPaint, FillRect, FrameRect, GdiFlush, GetStockObject, GetSysColor,
+    GetSysColorBrush, IntersectClipRect, InvalidateRect, LineTo, MoveToEx, Polygon, Rectangle,
     RestoreDC, SaveDC, SelectObject, SetBkMode, SetStretchBltMode, SetTextColor, StretchBlt,
-    CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, DEFAULT_CHARSET, DT_NOPREFIX, DT_WORDBREAK, HALFTONE,
-    HDC, HGDIOBJ, HOLLOW_BRUSH, OUT_DEFAULT_PRECIS, PAINTSTRUCT, PS_INSIDEFRAME, SRCCOPY,
+    AC_SRC_OVER, BLENDFUNCTION, CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, COLOR_BTNFACE,
+    COLOR_BTNTEXT, COLOR_GRAYTEXT, DEFAULT_CHARSET, DT_NOPREFIX, DT_WORDBREAK, HALFTONE, HDC,
+    HGDIOBJ, HOLLOW_BRUSH, OUT_DEFAULT_PRECIS, PAINTSTRUCT, PS_INSIDEFRAME, PS_SOLID, SRCCOPY,
     TRANSPARENT,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows::Win32::UI::Controls::CheckRadioButton;
+use windows::Win32::UI::Controls::{CheckRadioButton, DRAWITEMSTRUCT, ODS_DISABLED, ODS_SELECTED};
 use windows::Win32::UI::HiDpi::AdjustWindowRectExForDpi;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetKeyState, ReleaseCapture, SetCapture, SetFocus, VK_CONTROL, VK_ESCAPE, VK_MENU, VK_RETURN,
-    VK_SHIFT,
+    EnableWindow, GetKeyState, ReleaseCapture, SetCapture, SetFocus, VK_CONTROL, VK_ESCAPE,
+    VK_MENU, VK_RETURN, VK_SHIFT,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, GetClientRect, GetDlgItem, GetWindowLongPtrW,
     LoadCursorW, MessageBoxW, MoveWindow, RegisterClassW, SendMessageW, SetWindowLongPtrW,
     SetWindowPos, SetWindowTextW, ShowWindow, GWLP_USERDATA, HMENU, IDC_CROSS, IDNO, IDYES,
     MB_ICONQUESTION, MB_YESNOCANCEL, SWP_NOACTIVATE, SWP_NOZORDER, SW_SHOW, WINDOW_EX_STYLE,
-    WM_CHAR, WM_CLOSE, WM_COMMAND, WM_DPICHANGED, WM_ERASEBKGND, WM_KEYDOWN, WM_LBUTTONDOWN,
-    WM_LBUTTONUP, WM_MOUSEMOVE, WM_NCCREATE, WM_NCDESTROY, WM_PAINT, WM_SETFONT, WM_SIZE,
-    WM_SYSKEYDOWN, WNDCLASSW, WS_CHILD, WS_OVERLAPPEDWINDOW, WS_VISIBLE,
+    WM_CHAR, WM_CLOSE, WM_COMMAND, WM_DPICHANGED, WM_DRAWITEM, WM_ERASEBKGND, WM_KEYDOWN,
+    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_NCCREATE, WM_NCDESTROY, WM_PAINT, WM_SETFONT,
+    WM_SIZE, WM_SYSKEYDOWN, WNDCLASSW, WS_CHILD, WS_OVERLAPPEDWINDOW, WS_VISIBLE,
 };
 
 use crate::platform::gdi::{ScreenDc, Surface};
 
 use super::model::{
-    enter_action, font_px, Editor, EnterAction, EscapeResult, Item, Tool, Typing, View,
+    apply_pixel_layer, arrow_geometry, enter_action, font_px, shortcut, Color, Editor, EnterAction,
+    EscapeResult, Item, Style, Thickness, Tool, Typing, View, HIGHLIGHT_ALPHA,
 };
 
 const CLASS_NAME: PCWSTR = w!("RustShotAnnotate");
@@ -53,52 +59,105 @@ static REGISTER: Once = Once::new();
 /// Toolbar height and canvas margin at 96 DPI; scaled by the window's DPI (see `dpi`).
 const TOOLBAR_H: i32 = 40;
 const MARGIN: i32 = 8;
-/// Toolbar buttons: id, label, x, width, extra style — all lengths at 96 DPI.
-const BUTTONS: [(i32, PCWSTR, i32, i32, u32); 5] = [
-    (
-        ID_RECT,
-        w!("Rectangle"),
-        8,
-        80,
-        BS_PUSHLIKE | BS_RADIOBUTTON | WS_GROUP,
-    ),
-    (ID_TEXT, w!("Text"), 92, 80, BS_PUSHLIKE | BS_RADIOBUTTON),
-    (ID_UNDO, w!("Undo"), 188, 60, 0),
-    (ID_SAVE, w!("Save"), 256, 60, 0),
-    (ID_COPY, w!("Copy"), 324, 60, 0),
+/// The narrowest client area that shows the whole toolbar, at 96 DPI.
+const TOOLBAR_W: i32 = 854;
+/// Toolbar buttons: id, label, x, width, extra style — all lengths at 96 DPI. The tool buttons
+/// are radio buttons (their ids must stay consecutive, in [`Tool::ALL`] order); the swatches and
+/// thickness buttons are owner-drawn (`WM_DRAWITEM`), their labels only name them for screen
+/// readers.
+const BUTTONS: [(i32, PCWSTR, i32, i32, u32); 18] = [
+    (ID_RECT, w!("Rectangle"), 8, 76, TOOL | WS_GROUP),
+    (ID_RECT + 1, w!("Text"), 88, 46, TOOL),
+    (ID_RECT + 2, w!("Arrow"), 138, 52, TOOL),
+    (ID_RECT + 3, w!("Highlight"), 194, 68, TOOL),
+    (ID_RECT + 4, w!("Pixelate"), 266, 64, TOOL),
+    (ID_COLOR0, w!("Red"), 342, 26, BS_OWNERDRAW),
+    (ID_COLOR0 + 1, w!("Yellow"), 370, 26, BS_OWNERDRAW),
+    (ID_COLOR0 + 2, w!("Green"), 398, 26, BS_OWNERDRAW),
+    (ID_COLOR0 + 3, w!("Blue"), 426, 26, BS_OWNERDRAW),
+    (ID_COLOR0 + 4, w!("Black"), 454, 26, BS_OWNERDRAW),
+    (ID_COLOR0 + 5, w!("White"), 482, 26, BS_OWNERDRAW),
+    (ID_WIDTH0, w!("Thin"), 520, 30, BS_OWNERDRAW),
+    (ID_WIDTH0 + 1, w!("Medium"), 552, 30, BS_OWNERDRAW),
+    (ID_WIDTH0 + 2, w!("Thick"), 584, 30, BS_OWNERDRAW),
+    (ID_UNDO, w!("Undo"), 626, 52, 0),
+    (ID_REDO, w!("Redo"), 682, 52, 0),
+    (ID_SAVE, w!("Save"), 738, 52, 0),
+    (ID_COPY, w!("Copy"), 794, 52, 0),
 ];
-/// Outline thickness in image pixels.
-const LINE_PX: i32 = 3;
-const RED: COLORREF = COLORREF(0x0000_00FF); // 0x00BBGGRR
 
+/// First tool button; the five tools follow in [`Tool::ALL`] order.
 const ID_RECT: i32 = 201;
-const ID_TEXT: i32 = 202;
-const ID_UNDO: i32 = 203;
-const ID_SAVE: i32 = 204;
-const ID_COPY: i32 = 205;
+const ID_TOOL_LAST: i32 = ID_RECT + Tool::ALL.len() as i32 - 1;
+const ID_UNDO: i32 = 210;
+const ID_REDO: i32 = 211;
+const ID_SAVE: i32 = 212;
+const ID_COPY: i32 = 213;
+/// Colour swatches, in [`Color::PALETTE`] order.
+const ID_COLOR0: i32 = 220;
+/// Thickness buttons, in [`Thickness::ALL`] order.
+const ID_WIDTH0: i32 = 230;
 
 // Button styles (kept local, like the Settings dialog does).
 const BS_PUSHLIKE: u32 = 0x1000;
 const BS_RADIOBUTTON: u32 = 0x4;
+const BS_OWNERDRAW: u32 = 0xB;
 const WS_GROUP: u32 = 0x0002_0000;
+const TOOL: u32 = BS_PUSHLIKE | BS_RADIOBUTTON;
+
+/// The control id → what it selects.
+fn tool_of(id: i32) -> Option<Tool> {
+    Tool::ALL.get(usize::try_from(id - ID_RECT).ok()?).copied()
+}
+fn color_of(id: i32) -> Option<Color> {
+    Color::PALETTE
+        .get(usize::try_from(id - ID_COLOR0).ok()?)
+        .copied()
+}
+fn thickness_of(id: i32) -> Option<Thickness> {
+    Thickness::ALL
+        .get(usize::try_from(id - ID_WIDTH0).ok()?)
+        .copied()
+}
+
+/// What the toolbar last showed, so it is only touched when this changes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Shown {
+    tool: Tool,
+    style: Style,
+    can_redo: bool,
+}
 
 /// Per-window state, owned by the window (freed in `WM_NCDESTROY`).
 struct Ctx {
     editor: Editor,
+    /// The screenshot as loaded; never modified (the pixel layer is applied to copies).
     image: Rgba,
-    /// The screenshot as a DIB-backed memory DC, for fast scaled blits.
+    /// The screenshot with the pixel items in `src_pixels` applied, as a DIB-backed memory DC
+    /// for fast scaled blits.
     src: Surface,
+    /// The pixel items baked into `src`; `src` is rebuilt when the editor's differ.
+    src_pixels: Vec<Item>,
     source: PathBuf,
     /// Last view mapping computed by layout.
     view: View,
-    /// True when there are annotations not yet saved.
-    dirty: bool,
+    /// The items as last saved; the editor has unsaved work when its items differ (and exist).
+    saved: Vec<Item>,
     /// Pending UTF-16 high surrogate from a `WM_CHAR` pair.
     high_surrogate: Option<u16>,
     /// DPI of the monitor the window is on; layout lengths are scaled by it.
     dpi: u32,
     /// Toolbar font at `dpi`.
     font: Option<crate::platform::dpi::UiFont>,
+    shown: Option<Shown>,
+}
+
+impl Ctx {
+    /// Annotations that are not in a saved file yet. An editor emptied by undo has nothing to
+    /// save, so it is not dirty either.
+    fn dirty(&self) -> bool {
+        !self.editor.items().is_empty() && self.editor.items() != self.saved.as_slice()
+    }
 }
 
 thread_local! {
@@ -126,12 +185,14 @@ fn try_open(path: &Path) -> Result<()> {
         editor: Editor::new(iw, ih),
         image,
         src,
+        src_pixels: Vec::new(),
         source: path.to_path_buf(),
         view: View::IDENTITY,
-        dirty: false,
+        saved: Vec::new(),
         high_surrogate: None,
         dpi: crate::platform::dpi::BASE,
         font: None,
+        shown: None,
     });
 
     // Size the window to the image where it fits, bounded by the work area of the monitor the
@@ -142,7 +203,7 @@ fn try_open(path: &Path) -> Result<()> {
     // WM_NCCREATE (via PENDING) and frees it in WM_NCDESTROY.
     let created = unsafe {
         let (sw, sh) = (work.right - work.left, work.bottom - work.top);
-        let cw = (iw + 2 * px(MARGIN)).clamp(px(640), (sw * 9 / 10).max(px(640)));
+        let cw = (iw + 2 * px(MARGIN)).clamp(px(TOOLBAR_W), (sw * 9 / 10).max(px(TOOLBAR_W)));
         let ch = (ih + px(TOOLBAR_H) + 2 * px(MARGIN)).clamp(px(420), (sh * 85 / 100).max(px(420)));
         let mut r = RECT {
             left: 0,
@@ -257,10 +318,125 @@ fn create_toolbar(parent: HWND) -> Result<()> {
             )
             .context("creating a toolbar button")?;
         }
-        let _ = CheckRadioButton(parent, ID_RECT, ID_TEXT, ID_RECT);
+        let _ = CheckRadioButton(parent, ID_RECT, ID_TOOL_LAST, ID_RECT);
     }
     set_dpi(parent, crate::platform::dpi::of_window(parent));
+    if let Some(ctx) = ctx_of(parent) {
+        sync_toolbar(parent, ctx);
+    }
     Ok(())
+}
+
+/// Bring the toolbar in line with the editor: the current tool's button pressed, its colour and
+/// thickness marked (or greyed out where the tool has none), Redo enabled when there is
+/// something to redo. Cheap when nothing changed.
+///
+/// Call it last in a handler: updating the buttons can re-enter the window procedure
+/// synchronously (an owner-drawn button repaints through `WM_DRAWITEM`, which reads the state),
+/// so `ctx` is not used once the buttons are touched, here or by the caller.
+fn sync_toolbar(hwnd: HWND, ctx: &mut Ctx) {
+    let now = Shown {
+        tool: ctx.editor.tool(),
+        style: ctx.editor.style(),
+        can_redo: ctx.editor.can_redo(),
+    };
+    if ctx.shown == Some(now) {
+        return;
+    }
+    ctx.shown = Some(now);
+    show_toolbar(hwnd, now);
+}
+
+/// The Win32 half of [`sync_toolbar`]; takes no reference to the window state.
+fn show_toolbar(hwnd: HWND, now: Shown) {
+    let tool_id = Tool::ALL
+        .iter()
+        .position(|t| *t == now.tool)
+        .map_or(ID_RECT, |i| ID_RECT + i as i32);
+    // SAFETY: checks, enables and invalidates our own child buttons.
+    unsafe {
+        let _ = CheckRadioButton(hwnd, ID_RECT, ID_TOOL_LAST, tool_id);
+        for (id, _, _, _, _) in BUTTONS {
+            let enable = if color_of(id).is_some() {
+                now.tool.uses_color()
+            } else if thickness_of(id).is_some() {
+                now.tool.uses_thickness()
+            } else if id == ID_REDO {
+                now.can_redo
+            } else {
+                continue;
+            };
+            if let Ok(button) = GetDlgItem(Some(hwnd), id) {
+                let _ = EnableWindow(button, enable);
+                // The swatches draw the selection themselves: repaint them all.
+                let _ = InvalidateRect(Some(button), None, false);
+            }
+        }
+    }
+}
+
+/// Paint one owner-drawn toolbar button: a colour swatch or a thickness sample, framed when it
+/// is the current tool's choice, blank or grey when the tool does not use it.
+fn draw_button(ctx: &Ctx, dis: &DRAWITEMSTRUCT) {
+    let id = dis.CtlID as i32;
+    let style = ctx.editor.style();
+    let disabled = dis.itemState.0 & ODS_DISABLED.0 != 0;
+    let pressed = dis.itemState.0 & ODS_SELECTED.0 != 0;
+    let (hdc, rc) = (dis.hDC, dis.rcItem);
+    let px = |v: i32| crate::platform::dpi::scale(v, ctx.dpi);
+    let inset = |r: RECT, d: i32| RECT {
+        left: r.left + d,
+        top: r.top + d,
+        right: r.right - d,
+        bottom: r.bottom - d,
+    };
+    // SAFETY: draws into the DC Windows hands us for this button; every object created here is
+    // deleted before returning.
+    unsafe {
+        FillRect(hdc, &rc, GetSysColorBrush(COLOR_BTNFACE));
+        let chosen = !disabled
+            && (color_of(id) == Some(style.color) || thickness_of(id) == Some(style.thickness));
+        let frame_color = if chosen {
+            GetSysColor(COLOR_BTNTEXT)
+        } else {
+            GetSysColor(COLOR_GRAYTEXT)
+        };
+        let frame = CreateSolidBrush(COLORREF(frame_color));
+        let mut box_rc = inset(rc, px(2));
+        if pressed {
+            box_rc = inset(box_rc, 1);
+        }
+        FrameRect(hdc, &box_rc, frame);
+        if chosen {
+            // A second ring makes the choice obvious next to the 1-px frames of the others.
+            FrameRect(hdc, &inset(box_rc, 1), frame);
+        }
+        let _ = DeleteObject(HGDIOBJ(frame.0));
+
+        let inner = inset(box_rc, px(3));
+        if let Some(color) = color_of(id) {
+            if !disabled {
+                let fill = CreateSolidBrush(colorref(color));
+                FillRect(hdc, &inner, fill);
+                let _ = DeleteObject(HGDIOBJ(fill.0));
+            }
+        } else if let Some(thickness) = thickness_of(id) {
+            let ink = if disabled {
+                COLOR_GRAYTEXT
+            } else {
+                COLOR_BTNTEXT
+            };
+            let w = px(thickness.px()).max(1);
+            let mid = (inner.top + inner.bottom) / 2;
+            let bar = RECT {
+                left: inner.left,
+                top: mid - w / 2,
+                right: inner.right,
+                bottom: mid - w / 2 + w,
+            };
+            FillRect(hdc, &bar, GetSysColorBrush(ink));
+        }
+    }
 }
 
 /// Adopt `dpi` (at creation, and on `WM_DPICHANGED` when the window moves to a monitor with a
@@ -368,12 +544,13 @@ unsafe fn wndproc_inner(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) ->
                 let _ = SetFocus(Some(hwnd));
             }
             let p = to_image(ctx, lparam);
-            ctx.editor.on_down(p);
+            ctx.editor.on_down(p); // may commit the text box being typed
+            sync_toolbar(hwnd, ctx);
             redraw(hwnd);
             LRESULT(0)
         }
         WM_MOUSEMOVE => {
-            if ctx.editor.drag_rect().is_some() {
+            if ctx.editor.is_dragging() {
                 let p = to_image(ctx, lparam);
                 ctx.editor.on_move(p);
                 redraw(hwnd);
@@ -385,12 +562,9 @@ unsafe fn wndproc_inner(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) ->
             unsafe {
                 let _ = ReleaseCapture();
             }
-            let before = ctx.editor.items().len();
             let p = to_image(ctx, lparam);
             ctx.editor.on_up(p);
-            if ctx.editor.items().len() != before {
-                ctx.dirty = true;
-            }
+            sync_toolbar(hwnd, ctx);
             redraw(hwnd);
             LRESULT(0)
         }
@@ -409,30 +583,26 @@ unsafe fn wndproc_inner(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) ->
         }
         WM_COMMAND => {
             let id = (wparam.0 & 0xFFFF) as i32;
-            match id {
-                ID_RECT | ID_TEXT => {
-                    let before = ctx.editor.items().len();
-                    ctx.editor.set_tool(if id == ID_RECT {
-                        Tool::Rect
-                    } else {
-                        Tool::Text
-                    });
-                    if ctx.editor.items().len() != before {
-                        ctx.dirty = true;
+            if let Some(tool) = tool_of(id) {
+                ctx.editor.set_tool(tool);
+            } else if let Some(color) = color_of(id) {
+                ctx.editor.set_color(color);
+            } else if let Some(thickness) = thickness_of(id) {
+                ctx.editor.set_thickness(thickness);
+            } else {
+                match id {
+                    ID_UNDO => {
+                        ctx.editor.undo();
                     }
-                    // SAFETY: keep the two tool buttons mutually exclusive.
-                    unsafe {
-                        let _ = CheckRadioButton(hwnd, ID_RECT, ID_TEXT, id);
+                    ID_REDO => {
+                        ctx.editor.redo();
                     }
+                    ID_SAVE => save(hwnd, ctx),
+                    ID_COPY => copy(hwnd, ctx),
+                    _ => {}
                 }
-                ID_UNDO => {
-                    ctx.editor.undo();
-                    ctx.dirty = !ctx.editor.items().is_empty();
-                }
-                ID_SAVE => save(hwnd, ctx),
-                ID_COPY => copy(hwnd, ctx),
-                _ => {}
             }
+            sync_toolbar(hwnd, ctx);
             // Buttons grab focus on click; typed characters must keep reaching the canvas.
             // SAFETY: refocus our own window.
             unsafe {
@@ -441,9 +611,15 @@ unsafe fn wndproc_inner(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) ->
             redraw(hwnd);
             LRESULT(0)
         }
+        WM_DRAWITEM => {
+            // SAFETY: for WM_DRAWITEM, lParam points at a DRAWITEMSTRUCT valid for this call.
+            let dis = unsafe { &*(lparam.0 as *const DRAWITEMSTRUCT) };
+            draw_button(ctx, dis);
+            LRESULT(1)
+        }
         WM_CLOSE => {
             finish_typing(ctx);
-            let dirty = ctx.dirty;
+            let dirty = ctx.dirty();
             // `ctx` is not used past this point: the message box below pumps messages, and
             // WM_PAINT & co. re-enter this procedure with their own reference to the state.
             if confirm_close(hwnd, dirty) {
@@ -488,7 +664,12 @@ fn handle_char(hwnd: HWND, ctx: &mut Ctx, unit: u16) {
                 (_, u) => char::from_u32(u as u32),
             };
             if let Some(c) = ch {
-                ctx.editor.on_char(c);
+                if ctx.editor.is_typing() {
+                    ctx.editor.on_char(c);
+                } else if let Some(sc) = shortcut(c) {
+                    ctx.editor.apply_shortcut(sc);
+                    sync_toolbar(hwnd, ctx);
+                }
             }
         }
     }
@@ -505,11 +686,7 @@ fn handle_key(hwnd: HWND, ctx: &mut Ctx, vk: u16) {
         match enter_action(down(VK_SHIFT), down(VK_MENU)) {
             EnterAction::NewLine => ctx.editor.on_newline(),
             EnterAction::Commit => {
-                let before = ctx.editor.items().len();
                 ctx.editor.on_enter();
-                if ctx.editor.items().len() != before {
-                    ctx.dirty = true;
-                }
             }
         }
     } else if vk == VK_ESCAPE.0 {
@@ -524,14 +701,16 @@ fn handle_key(hwnd: HWND, ctx: &mut Ctx, vk: u16) {
                 );
             }
         }
+    } else if ctrl && (vk == b'Y' as u16 || (vk == b'Z' as u16 && down(VK_SHIFT))) {
+        ctx.editor.redo();
     } else if ctrl && vk == b'Z' as u16 {
         ctx.editor.undo();
-        ctx.dirty = !ctx.editor.items().is_empty();
     } else if ctrl && vk == b'S' as u16 {
         save(hwnd, ctx);
     } else if ctrl && vk == b'C' as u16 && !ctx.editor.is_typing() {
         copy(hwnd, ctx);
     }
+    sync_toolbar(hwnd, ctx);
     redraw(hwnd);
 }
 
@@ -566,10 +745,33 @@ fn redraw(hwnd: HWND) {
     }
 }
 
+/// Rebuild the canvas source when the pixel items changed (a highlight or pixelate area drawn,
+/// undone or redone), so the screen shows the pixels the export will contain.
+fn sync_source(ctx: &mut Ctx) {
+    let pixels: Vec<Item> = ctx
+        .editor
+        .items()
+        .iter()
+        .filter(|i| i.is_pixel())
+        .cloned()
+        .collect();
+    if pixels == ctx.src_pixels {
+        return;
+    }
+    match make_source_dc(&apply_pixel_layer(&ctx.image, &pixels)) {
+        Ok(src) => ctx.src = src,
+        // The export renders from the items, not from this surface, so only the on-screen
+        // preview is stale. Not retried on every paint.
+        Err(e) => tracing::warn!("could not update the annotation preview: {e:#}"),
+    }
+    ctx.src_pixels = pixels;
+}
+
 fn paint(hwnd: HWND, ctx: &mut Ctx) {
     if ctx.view == View::IDENTITY {
         relayout(hwnd, ctx);
     }
+    sync_source(ctx);
     // SAFETY: standard double-buffered paint into a compatible bitmap, then one BitBlt.
     unsafe {
         let mut ps = PAINTSTRUCT::default();
@@ -611,7 +813,7 @@ fn paint(hwnd: HWND, ctx: &mut Ctx) {
         paint_items(
             back,
             ctx.editor.items(),
-            ctx.editor.drag_rect(),
+            ctx.editor.preview().as_ref(),
             ctx.editor.typing(),
             v,
         );
@@ -623,48 +825,139 @@ fn paint(hwnd: HWND, ctx: &mut Ctx) {
     }
 }
 
-/// Draw all annotations with `view` mapping image px → `hdc` px. Used for the live preview and,
-/// with [`View::IDENTITY`], for the exported image.
+/// Draw all vector annotations with `view` mapping image px → `hdc` px. Used for the live
+/// preview and, with [`View::IDENTITY`], for the exported image. Pixel items are not drawn: they
+/// are already in the pixels underneath ([`apply_pixel_layer`]). `preview` is the shape being
+/// dragged (on screen only).
 fn paint_items(
     hdc: HDC,
     items: &[Item],
-    preview: Option<Rect>,
+    preview: Option<&Item>,
     typing: Option<&Typing>,
     view: View,
 ) {
-    // SAFETY: GDI pen/brush selection and drawing on a DC we are given; objects are restored and
-    // deleted before returning.
-    unsafe {
-        let pen = CreatePen(PS_INSIDEFRAME, view.px(LINE_PX).max(1), RED);
-        let old_pen = SelectObject(hdc, HGDIOBJ(pen.0));
-        let old_brush = SelectObject(hdc, GetStockObject(HOLLOW_BRUSH));
+    for item in items {
+        paint_item(hdc, item, view);
+    }
+    if let Some(item) = preview {
+        paint_preview(hdc, item, view);
+    }
+    if let Some(t) = typing {
+        outline(hdc, t.rect, t.style, view);
+        // A trailing bar stands in for the caret while typing.
+        draw_text(hdc, t.rect, &format!("{}|", t.text), t.style.color, view);
+    }
+}
 
-        let outline = |r: Rect| {
-            let vr = view_rect(view, r);
-            let _ = Rectangle(hdc, vr.left, vr.top, vr.right, vr.bottom);
-        };
+fn paint_item(hdc: HDC, item: &Item, view: View) {
+    match item {
+        Item::Rect(r, style) => outline(hdc, *r, *style, view),
+        Item::Text { rect, text, style } => {
+            outline(hdc, *rect, *style, view);
+            draw_text(hdc, *rect, text, style.color, view);
+        }
+        Item::Arrow { from, to, style } => draw_arrow(hdc, *from, *to, *style, view),
+        Item::Highlight(..) | Item::Pixelate(_) => {}
+    }
+}
 
-        for item in items {
-            match item {
-                Item::Rect(r) => outline(*r),
-                Item::Text { rect, text } => {
-                    outline(*rect);
-                    draw_text(hdc, *rect, text, view);
-                }
+/// The shape being dragged. Pixel items are only applied to the pixels on release, so until
+/// then a highlight is shown by a GDI alpha blend at the same opacity and a pixelate area by a
+/// dotted frame.
+fn paint_preview(hdc: HDC, item: &Item, view: View) {
+    match item {
+        Item::Highlight(r, color) => alpha_fill(hdc, *r, *color, view),
+        Item::Pixelate(r) => {
+            let vr = view_rect(view, *r);
+            // SAFETY: draws a dotted (XOR) frame on the DC we are given.
+            unsafe {
+                let _ = DrawFocusRect(hdc, &vr);
             }
         }
-        if let Some(r) = preview {
-            outline(r);
-        }
-        if let Some(t) = typing {
-            outline(t.rect);
-            // A trailing bar stands in for the caret while typing.
-            draw_text(hdc, t.rect, &format!("{}|", t.text), view);
-        }
+        _ => paint_item(hdc, item, view),
+    }
+}
 
+/// `r` filled with `color` at the highlighter's opacity: a 1×1 DIB of the colour stretched over
+/// it with a constant-alpha blend.
+fn alpha_fill(hdc: HDC, r: Rect, color: Color, view: View) {
+    let vr = view_rect(view, r);
+    let (w, h) = (vr.right - vr.left, vr.bottom - vr.top);
+    if w <= 0 || h <= 0 {
+        return;
+    }
+    let Ok(screen) = ScreenDc::get() else {
+        return;
+    };
+    let Ok(mut dot) = Surface::dib(screen.0, 1, 1) else {
+        return;
+    };
+    let [red, green, blue] = color.rgb();
+    if let Some(px) = dot.pixels_mut() {
+        px.copy_from_slice(&[blue, green, red, 255]);
+    }
+    let blend = BLENDFUNCTION {
+        BlendOp: AC_SRC_OVER as u8,
+        BlendFlags: 0,
+        SourceConstantAlpha: HIGHLIGHT_ALPHA,
+        AlphaFormat: 0,
+    };
+    // SAFETY: blends our 1×1 DIB onto the DC we are given.
+    unsafe {
+        let _ = AlphaBlend(hdc, vr.left, vr.top, w, h, dot.dc, 0, 0, 1, 1, blend);
+    }
+}
+
+/// GDI's 0x00BBGGRR for a palette colour.
+fn colorref(color: Color) -> COLORREF {
+    let [r, g, b] = color.rgb();
+    COLORREF(u32::from(r) | (u32::from(g) << 8) | (u32::from(b) << 16))
+}
+
+/// A rectangle outline drawn just inside `r`.
+fn outline(hdc: HDC, r: Rect, style: Style, view: View) {
+    let width = view.px(style.thickness.px()).max(1);
+    let vr = view_rect(view, r);
+    // SAFETY: pen/brush selection and drawing on the DC we are given; both are restored and the
+    // pen deleted before returning.
+    unsafe {
+        let pen = CreatePen(PS_INSIDEFRAME, width, colorref(style.color));
+        let old_pen = SelectObject(hdc, HGDIOBJ(pen.0));
+        let old_brush = SelectObject(hdc, GetStockObject(HOLLOW_BRUSH));
+        let _ = Rectangle(hdc, vr.left, vr.top, vr.right, vr.bottom);
         SelectObject(hdc, old_pen);
         SelectObject(hdc, old_brush);
         let _ = DeleteObject(HGDIOBJ(pen.0));
+    }
+}
+
+/// An arrow with a filled head ([`arrow_geometry`]).
+fn draw_arrow(hdc: HDC, from: Point, to: Point, style: Style, view: View) {
+    let g = arrow_geometry(from, to, style.thickness.px());
+    let at = |p: Point| POINT {
+        x: view.ox + view.px(p.x),
+        y: view.oy + view.px(p.y),
+    };
+    let (tail, shaft_end) = (at(g.tail), at(g.shaft_end));
+    let head = [at(g.tip), at(g.left), at(g.right)];
+    let color = colorref(style.color);
+    // SAFETY: line and polygon drawing on the DC we are given; the pens and the brush are
+    // deselected and deleted before returning.
+    unsafe {
+        let shaft = CreatePen(PS_SOLID, view.px(style.thickness.px()).max(1), color);
+        let old_pen = SelectObject(hdc, HGDIOBJ(shaft.0));
+        let _ = MoveToEx(hdc, tail.x, tail.y, None);
+        let _ = LineTo(hdc, shaft_end.x, shaft_end.y);
+        let thin = CreatePen(PS_SOLID, 1, color);
+        let brush = CreateSolidBrush(color);
+        SelectObject(hdc, HGDIOBJ(thin.0));
+        let old_brush = SelectObject(hdc, HGDIOBJ(brush.0));
+        let _ = Polygon(hdc, &head);
+        SelectObject(hdc, old_pen);
+        SelectObject(hdc, old_brush);
+        let _ = DeleteObject(HGDIOBJ(shaft.0));
+        let _ = DeleteObject(HGDIOBJ(thin.0));
+        let _ = DeleteObject(HGDIOBJ(brush.0));
     }
 }
 
@@ -677,8 +970,8 @@ fn view_rect(view: View, r: Rect) -> RECT {
     }
 }
 
-/// Word-wrapped red text inside `rect`, clipped to it.
-fn draw_text(hdc: HDC, rect: Rect, text: &str, view: View) {
+/// Word-wrapped text inside `rect`, clipped to it.
+fn draw_text(hdc: HDC, rect: Rect, text: &str, color: Color, view: View) {
     let mut wide: Vec<u16> = text.encode_utf16().collect();
     if wide.is_empty() {
         return;
@@ -713,7 +1006,7 @@ fn draw_text(hdc: HDC, rect: Rect, text: &str, view: View) {
         let saved = SaveDC(hdc);
         IntersectClipRect(hdc, outer.left, outer.top, outer.right, outer.bottom);
         SetBkMode(hdc, TRANSPARENT);
-        SetTextColor(hdc, RED);
+        SetTextColor(hdc, colorref(color));
         DrawTextW(hdc, &mut wide, &mut inner, DT_WORDBREAK | DT_NOPREFIX);
         let _ = RestoreDC(hdc, saved);
         SelectObject(hdc, old_font);
@@ -740,9 +1033,11 @@ fn make_source_dc(img: &Rgba) -> Result<Surface> {
     Ok(surface)
 }
 
-/// Render `items` onto a copy of `img` at full resolution (what Save/Copy produce).
+/// Render `items` onto a copy of `img` at full resolution (what Save/Copy produce): the pixel
+/// items (pixelate) change the pixels first, then the outlines and text are drawn on top. The
+/// redacted pixels are what gets encoded — the original detail is not in the output at all.
 pub fn render(img: &Rgba, items: &[Item]) -> Result<Rgba> {
-    let surface = make_source_dc(img)?;
+    let surface = make_source_dc(&apply_pixel_layer(img, items))?;
     // SAFETY: draw into our DIB-backed DC, then flush GDI so the pixels are complete.
     unsafe {
         paint_items(surface.dc, items, None, None, View::IDENTITY);
@@ -784,9 +1079,7 @@ fn set_status(hwnd: HWND, ctx: &Ctx, status: &str) {
 
 /// Commit any text being typed so Save/Copy include it.
 fn finish_typing(ctx: &mut Ctx) {
-    if ctx.editor.on_enter() {
-        ctx.dirty = true;
-    }
+    ctx.editor.on_enter();
 }
 
 fn save(hwnd: HWND, ctx: &mut Ctx) {
@@ -802,7 +1095,7 @@ fn save(hwnd: HWND, ctx: &mut Ctx) {
     });
     match result {
         Ok(path) => {
-            ctx.dirty = false;
+            ctx.saved = ctx.editor.items().to_vec();
             let name = path
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
@@ -853,7 +1146,7 @@ fn confirm_close(hwnd: HWND, dirty: bool) -> bool {
             return true;
         };
         save(hwnd, ctx);
-        !ctx.dirty // closes only if the save worked
+        !ctx.dirty() // closes only if the save worked
     } else {
         answer == IDNO
     }
@@ -896,7 +1189,11 @@ mod tests {
 
     #[test]
     fn rectangle_is_drawn_in_pure_red_inside_its_bounds() {
-        let out = render(&white(120, 80), &[Item::Rect(Rect::new(10, 10, 60, 30))]).unwrap();
+        let out = render(
+            &white(120, 80),
+            &[Item::Rect(Rect::new(10, 10, 60, 30), Style::DEFAULT)],
+        )
+        .unwrap();
         // Border pixels (3 px wide, inside the frame) are pure red...
         assert_eq!(px(&out, 11, 25), [255, 0, 0, 255], "left edge");
         assert_eq!(px(&out, 40, 11), [255, 0, 0, 255], "top edge");
@@ -914,6 +1211,7 @@ mod tests {
             &[Item::Text {
                 rect,
                 text: "Hello".into(),
+                style: Style::DEFAULT,
             }],
         )
         .unwrap();
@@ -953,6 +1251,7 @@ mod tests {
             &[Item::Text {
                 rect,
                 text: "A".into(),
+                style: Style::DEFAULT,
             }],
         )
         .unwrap();
@@ -961,6 +1260,7 @@ mod tests {
             &[Item::Text {
                 rect,
                 text: "A\nA".into(),
+                style: Style::DEFAULT,
             }],
         )
         .unwrap();
@@ -983,10 +1283,177 @@ mod tests {
         let mut src = white(64, 48);
         let i = ((24 * 64 + 30) * 4) as usize;
         src.as_mut()[i..i + 4].copy_from_slice(&[10, 20, 30, 255]);
-        let out = render(&src, &[Item::Rect(Rect::new(2, 2, 10, 10))]).unwrap();
+        let out = render(&src, &[Item::Rect(Rect::new(2, 2, 10, 10), Style::DEFAULT)]).unwrap();
         assert_eq!((out.width(), out.height()), (64, 48));
         assert_eq!(px(&out, 30, 24), [10, 20, 30, 255], "untouched pixel kept");
         assert!(out.pixels().all(|p| p.0[3] == 255), "all pixels opaque");
+    }
+
+    #[test]
+    fn pixelate_is_in_the_exported_pixels_under_the_outlines() {
+        // A checkerboard: any surviving detail shows up as unequal neighbours.
+        let (w, h) = (48u32, 48u32);
+        let mut raw = Vec::new();
+        for y in 0..h {
+            for x in 0..w {
+                let v = if (x + y) % 2 == 0 { 0 } else { 250 };
+                raw.extend_from_slice(&[v, v, v, 255]);
+            }
+        }
+        let src = Rgba::from_raw(w, h, raw).unwrap();
+        let out = render(
+            &src,
+            &[
+                Item::Pixelate(Rect::new(0, 0, 24, 24)),
+                Item::Rect(Rect::new(30, 30, 12, 12), Style::DEFAULT),
+            ],
+        )
+        .unwrap();
+        // The redacted square is flat (the checkerboard is gone)...
+        let first = px(&out, 0, 0);
+        for y in 0..24 {
+            for x in 0..24 {
+                assert_eq!(px(&out, x, y), first, "({x},{y}) kept detail");
+            }
+        }
+        assert_eq!(first, [125, 125, 125, 255]);
+        // ...outside it the source is intact, and the outline is still drawn in red.
+        assert_eq!(px(&out, 26, 2), px(&src, 26, 2));
+        assert_eq!(px(&out, 31, 36), [255, 0, 0, 255]);
+    }
+
+    #[test]
+    fn arrow_is_drawn_red_with_a_filled_head() {
+        let out = render(
+            &white(80, 40),
+            &[Item::Arrow {
+                from: Point::new(5, 20),
+                to: Point::new(60, 20),
+                style: Style::DEFAULT,
+            }],
+        )
+        .unwrap();
+        assert_eq!(px(&out, 20, 20), [255, 0, 0, 255], "shaft");
+        // Head: 14 px long, base at x = 46 spanning y 13..27; (50, 24) is inside it.
+        assert_eq!(px(&out, 50, 24), [255, 0, 0, 255], "filled head");
+        assert_eq!(px(&out, 20, 30), [255, 255, 255, 255], "off the shaft");
+        assert_eq!(px(&out, 70, 20), [255, 255, 255, 255], "past the point");
+    }
+
+    #[test]
+    fn highlight_is_blended_into_the_exported_pixels() {
+        let out = render(
+            &white(40, 40),
+            &[Item::Highlight(Rect::new(10, 10, 20, 20), Color::Yellow)],
+        )
+        .unwrap();
+        let a = u32::from(super::super::model::HIGHLIGHT_ALPHA);
+        let mix = |c: u8| ((u32::from(c) * a + 255 * (255 - a) + 127) / 255) as u8;
+        let [r, g, b] = Color::Yellow.rgb().map(mix);
+        assert_eq!(px(&out, 20, 20), [r, g, b, 255]);
+        assert_eq!(px(&out, 5, 5), [255, 255, 255, 255], "outside untouched");
+    }
+
+    #[test]
+    fn outlines_use_the_items_colour_and_thickness() {
+        let r = Rect::new(10, 10, 60, 30);
+        let blue_thick = Style {
+            color: Color::Blue,
+            thickness: super::super::model::Thickness::Thick,
+        };
+        let out = render(&white(120, 80), &[Item::Rect(r, blue_thick)]).unwrap();
+        let [b0, b1, b2] = Color::Blue.rgb();
+        // 6 px inside the frame: x = 10..16 on the left edge.
+        assert_eq!(px(&out, 15, 25), [b0, b1, b2, 255], "thick edge");
+        assert_eq!(px(&out, 17, 25), [255, 255, 255, 255], "interior");
+
+        let thin = Style {
+            thickness: super::super::model::Thickness::Thin,
+            ..Style::DEFAULT
+        };
+        let out = render(&white(120, 80), &[Item::Rect(r, thin)]).unwrap();
+        assert_eq!(px(&out, 11, 25), [255, 0, 0, 255], "thin edge");
+        assert_eq!(px(&out, 12, 25), [255, 255, 255, 255], "2 px only");
+    }
+
+    #[test]
+    fn text_is_drawn_in_its_colour() {
+        let green = Style {
+            color: Color::Green,
+            ..Style::DEFAULT
+        };
+        let out = render(
+            &white(120, 80),
+            &[Item::Text {
+                rect: Rect::new(5, 5, 110, 50),
+                text: "Hello".into(),
+                style: green,
+            }],
+        )
+        .unwrap();
+        let mut n = 0;
+        for y in 12..50 {
+            for x in 12..110 {
+                let p = px(&out, x, y);
+                if p[1] > 100 && p[0] < 80 && p[2] < 130 {
+                    n += 1;
+                }
+            }
+        }
+        assert!(n > 30, "expected green glyph pixels, found {n}");
+    }
+
+    #[test]
+    fn toolbar_ids_select_every_tool_colour_and_thickness() {
+        let ids = BUTTONS.map(|b| b.0);
+        for (i, tool) in Tool::ALL.into_iter().enumerate() {
+            let id = ID_RECT + i as i32;
+            assert!(ids.contains(&id));
+            assert_eq!(tool_of(id), Some(tool));
+        }
+        assert_eq!(ID_TOOL_LAST, ID_RECT + 4);
+        for (i, color) in Color::PALETTE.into_iter().enumerate() {
+            assert!(ids.contains(&(ID_COLOR0 + i as i32)));
+            assert_eq!(color_of(ID_COLOR0 + i as i32), Some(color));
+        }
+        for (i, t) in Thickness::ALL.into_iter().enumerate() {
+            assert!(ids.contains(&(ID_WIDTH0 + i as i32)));
+            assert_eq!(thickness_of(ID_WIDTH0 + i as i32), Some(t));
+        }
+        for id in [
+            ID_UNDO,
+            ID_REDO,
+            ID_SAVE,
+            ID_COPY,
+            ID_RECT - 1,
+            ID_COLOR0 + 6,
+        ] {
+            assert_eq!(
+                (tool_of(id), color_of(id), thickness_of(id)),
+                (None, None, None)
+            );
+        }
+        let mut sorted = ids.to_vec();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(sorted.len(), ids.len(), "duplicate control id");
+    }
+
+    #[test]
+    fn toolbar_buttons_do_not_overlap_and_fit_the_minimum_width() {
+        let mut spans: Vec<(i32, i32)> = BUTTONS.iter().map(|b| (b.2, b.2 + b.3)).collect();
+        spans.sort_unstable();
+        for w in spans.windows(2) {
+            assert!(w[0].1 <= w[1].0, "{:?} overlaps {:?}", w[0], w[1]);
+        }
+        let right = spans.last().map(|s| s.1).unwrap();
+        assert!(right + MARGIN <= TOOLBAR_W, "toolbar is {right} px wide");
+    }
+
+    #[test]
+    fn colorref_is_bgr() {
+        assert_eq!(colorref(Color::Red), COLORREF(0x0000_00FF));
+        assert_eq!(colorref(Color::Blue), COLORREF(0x00E6_6E00));
     }
 
     #[test]

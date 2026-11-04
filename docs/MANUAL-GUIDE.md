@@ -15,7 +15,9 @@ Applies to **RustShot 0.1.8**.
 RustShot is a small Windows app that lives in the system tray (the icons next to the clock). It
 has no main window. It does two things:
 
-- **Screenshots**: a region you drag, one window, one monitor, or every monitor at once.
+- **Screenshots**: a region you drag, one window, one monitor, or every monitor at once —
+  then mark them up with rectangles, text, arrows and a highlighter, or pixelate what others
+  must not see.
 - **Screen recordings**: a region or window recorded to **MP4** video (optionally with
   microphone and computer sound), or to an animated **GIF**.
 
@@ -116,18 +118,52 @@ then waits that many seconds before capturing. Nothing is shown while it waits.
 ## 6. Annotate a screenshot
 
 1. In the preview panel, click **Annotate**. The editor opens with your screenshot.
-2. Choose a tool from the toolbar. Both draw in red.
-   - **Rectangle**: drag over the image.
-   - **Text**: drag a box, then type. **Enter** places the text; **Shift+Enter** or
+2. Choose a tool from the toolbar, or press its letter key:
+   - **Rectangle** (`R`): drag over the image.
+   - **Text** (`T`): drag a box, then type. **Enter** places the text; **Shift+Enter** or
      **Alt+Enter** starts a new line; **Backspace** deletes; **Esc** throws the text away;
      clicking elsewhere also places it.
-3. **Undo** (`Ctrl+Z`) removes the last mark.
-4. **Save** (`Ctrl+S`) writes a copy next to the original named `…_annotated.png`; saving again
+   - **Arrow** (`A`): drag from where the arrow starts to what it should point at. The head is
+     drawn where you let go of the mouse button.
+   - **Highlight** (`H`): drag over text to mark it with a see-through colour, like a
+     highlighter pen. The text underneath stays readable.
+   - **Pixelate** (`P`): drag over anything you want to hide — a password, an e-mail address, a
+     name. The area turns into coarse blocks. Read *Hiding information safely* below.
+3. **Colour and line.** The six colour squares (red, yellow, green, blue, black, white — keys
+   `1` to `6`) and the three line samples (thin, medium, thick — `[` thinner, `]` thicker) set
+   the colour and line of the **current tool**. The chosen square or line has a dark double
+   frame. Each tool remembers its own choice: Rectangle, Text and Arrow start red and medium
+   (exactly as before these options existed), Highlight starts yellow. When a tool does not use
+   a setting, its buttons are greyed out (Pixelate has no colour; Highlight and Pixelate have no
+   line). Picking a colour while typing changes the text you are typing.
+4. **Undo** (`Ctrl+Z`) removes the last mark; **Redo** (`Ctrl+Y` or `Ctrl+Shift+Z`) brings it
+   back. Drawing something new after an undo clears what could be redone, and Redo is greyed out
+   when there is nothing to redo.
+5. **Save** (`Ctrl+S`) writes a copy next to the original named `…_annotated.png`; saving again
    makes `…_annotated_2.png`, and so on. **The original screenshot is never changed.**
-5. **Copy** (`Ctrl+C`) puts the annotated image on the clipboard.
+6. **Copy** (`Ctrl+C`) puts the annotated image on the clipboard.
 
 Closing the editor with unsaved marks asks whether to save first. Marks are drawn at the
-screenshot's full resolution, however small the editor window is.
+screenshot's full resolution, however small the editor window is. Highlight and Pixelate change
+the picture itself, so they always lie *under* rectangles, arrows and text.
+
+**The letter and number keys** work while you are not typing in a text box (while you type,
+they are part of your text). They follow the character the key types, so they work on any
+keyboard layout. With a Japanese, Chinese or Korean input method (IME) switched on, the keys go
+to the IME instead: switch it to direct input (half-width alphanumeric, e.g. with the
+`半角/全角` key) or use the toolbar.
+
+**Hiding information safely.** Pixelate replaces every 12 × 12-pixel block of the area with the
+block's average colour in the saved and copied image. The hidden detail is not in that image at
+all, so nobody can uncover it by removing a layer. Keep three things in mind:
+
+- **The original screenshot still shows everything.** Only the `…_annotated` copy and the
+  clipboard image are pixelated. Share that copy, and delete the original (preview panel
+  **Delete**, or in Explorer) if it must not be kept.
+- **Drag well past the edges** of what you hide, so no block holds only part of a letter.
+- Pixelate is meant for normal-size text such as names, addresses and numbers. Very large
+  lettering or a well-known logo can stay recognisable by its rough shape: leave such things out
+  of the capture instead.
 
 ## 7. Record a video (MP4)
 
@@ -227,6 +263,20 @@ usually opens the Snipping Tool: turn that off under *Settings → Accessibility
 the Print screen key to open screen capture*, or quit the other screenshot tool, or pick
 different shortcuts in RustShot. The tray tooltip shows how many shortcuts are unavailable, and
 Settings tells you if a new one is taken too. The tray menu always works.
+
+**In the annotation editor** (these work only in the editor window and cannot be changed):
+
+| Action | Keys |
+|---|---|
+| Rectangle / Text / Arrow / Highlight / Pixelate tool | `R` / `T` / `A` / `H` / `P` |
+| Colour red, yellow, green, blue, black, white | `1` … `6` |
+| Thinner / thicker line | `[` / `]` |
+| Undo / Redo | `Ctrl+Z` / `Ctrl+Y` or `Ctrl+Shift+Z` |
+| Save / Copy | `Ctrl+S` / `Ctrl+C` |
+| Place the text / new line in the text | `Enter` / `Shift+Enter` or `Alt+Enter` |
+| Cancel the text or shape in progress; close the editor if nothing is | `Esc` |
+
+While you are typing in a text box, the single keys (`R`, `1`, `[` …) type text instead.
 
 ## 11. Advanced: editing config.toml
 

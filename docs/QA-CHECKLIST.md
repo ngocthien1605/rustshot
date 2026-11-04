@@ -71,6 +71,48 @@ there are copied into this file.
       page, two monitors at different scales, 2026-10-23: pass.)*
 - [ ] Protected/DRM window → near-black detected and a warning surfaced (not a silent black PNG).
 
+## Annotation tools — arrow, highlight, pixelate, palette, redo (UI unverified)
+
+Written on Linux, where the editor window cannot be built or run: the pixel operations and the
+editor model are unit-tested, the Win32 code was only type-checked and linted for
+`x86_64-pc-windows-msvc`, and the GDI render tests in `annotate/win.rs` were compiled but never
+run. Every item below is still to be done by hand on Windows. Run `cargo test --workspace
+--locked` there first (the render tests check arrow, highlight, pixelate and colour pixels in
+the exported image).
+
+- [ ] **Defaults unchanged.** A fresh editor draws rectangles and text in red with the 3-px line,
+      as 0.1.8 did (compare an `_annotated` file from both builds of the same screenshot).
+- [ ] **Toolbar** at 100 %, 125 % and 150 %: Rectangle, Text, Arrow, Highlight, Pixelate, six
+      colour squares, three line samples, Undo, Redo, Save, Copy — none clipped or overlapping
+      when the editor opens. The current tool's button is pressed; its colour and line have a dark
+      double frame. Colour squares are blank and disabled for Pixelate; line samples are greyed
+      for Highlight and Pixelate. Redo is greyed until something is undone. Dragging the editor to
+      a monitor with another scale redraws the squares and samples at the new size.
+- [ ] **Arrow**: shown while dragging; on release the head is at the release point, filled, and
+      the shaft does not poke past the tip. A tiny drag (under ~6 px) leaves nothing. Thin /
+      medium / thick change the shaft and head; colour applies. Level and vertical arrows work.
+- [ ] **Highlight**: translucent while dragging; after release the canvas shows the same tint
+      and the text underneath is readable. Yellow by default; another colour applies. The saved
+      file matches the screen.
+- [ ] **Pixelate**: a dotted frame while dragging; on release the area turns into blocks on
+      screen. **Save**, open the `_annotated` file in another viewer (Photos, Paint), zoom in:
+      only blocks, no readable detail. **Copy**, paste into Paint: same. The original file is
+      unchanged. Try PNG and JPEG output.
+- [ ] **Layering**: a rectangle drawn first, then pixelated over, stays crisp on top; a
+      highlight under an arrow does not tint the arrow.
+- [ ] **Undo / Redo**: buttons, `Ctrl+Z`, `Ctrl+Y`, `Ctrl+Shift+Z`. Undoing a pixelate brings the
+      detail back on screen, redo hides it again. Drawing after an undo greys Redo. Redo does
+      nothing mid-drag or while a text box is open.
+- [ ] **Keys** `R` `T` `A` `H` `P`, `1`–`6`, `[` `]` switch tool / colour / line and the toolbar
+      follows. While typing in a text box they type text. With the Japanese IME on (hiragana) they
+      go to the IME; after `半角/全角` (direct input) they work. Picking a colour while typing
+      recolours that text.
+- [ ] **Unsaved prompt after click-away**: type text, click elsewhere on the image (commits it),
+      close → the save prompt appears (before this change it did not, and the text was lost).
+      Draw, Save, Undo everything, close → no prompt (nothing to save).
+- [ ] **Large screenshot** (4K or all monitors): drawing, undoing and redoing pixelate and
+      highlight stays responsive (the canvas is rebuilt on each change of those).
+
 ## M3 — Recording (MP4, video-only)
 - [ ] Countdown → compact always-on-top toolbar (elapsed + Pause/Stop) → Stop finalises.
 - [ ] 60 s 1080p30 monitor recording plays correctly in VLC and Windows Media Player.

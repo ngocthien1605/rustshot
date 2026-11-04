@@ -1,6 +1,7 @@
-//! The annotation editor opened from the post-capture flyout's **Annotate** button: draw red
-//! rectangles and red text boxes on a screenshot, then save an annotated copy or copy it to the
-//! clipboard. [`model`] is the pure, unit-tested editor logic; [`win`] is the Win32 window.
+//! The annotation editor opened from the post-capture flyout's **Annotate** button: draw
+//! rectangles, text boxes and arrows, highlight or pixelate (redact) areas of a screenshot, then
+//! save an annotated copy or copy it to the clipboard. [`model`] is the pure, unit-tested editor
+//! logic; [`win`] is the Win32 window.
 
 mod cursor;
 pub mod model;

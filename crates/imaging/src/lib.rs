@@ -257,6 +257,112 @@ pub fn crop(img: &RgbaImage, rect: Rect) -> Result<RgbaImage, ImagingError> {
     Ok(sub.to_image())
 }
 
+/// The smallest block [`pixelate`] uses; a smaller request is raised to it (a 1-px block would
+/// leave the image unchanged, which must never pass for a redaction).
+pub const MIN_PIXELATE_BLOCK: u32 = 2;
+
+/// Redact `region` by pixelation: the region is cut into `block × block` squares (anchored at
+/// the region's top-left) and every pixel of a square is replaced by the square's average
+/// colour. Pixels outside `region` are untouched; `region` is clamped to the image.
+///
+/// The result is irreversible: each square keeps only one value (its mean), so every image that
+/// has the same block means produces the same output, and nothing of the original detail is
+/// stored. A leftover strip at the right or bottom edge narrower than half a block is merged
+/// into the previous square rather than kept as a thin sliver, which would average fewer pixels
+/// and keep more detail. Pure: no I/O, the output depends only on the inputs.
+pub fn pixelate(img: &RgbaImage, region: Rect, block: u32) -> RgbaImage {
+    let mut out = img.clone();
+    pixelate_in_place(&mut out, region, block);
+    out
+}
+
+/// [`pixelate`] on a buffer the caller owns (no copy of the whole image).
+pub fn pixelate_in_place(img: &mut RgbaImage, region: Rect, block: u32) {
+    let Some((x0, y0, x1, y1)) = clamp_region(img, region) else {
+        return;
+    };
+    let block = block.max(MIN_PIXELATE_BLOCK);
+    for (by0, by1) in block_spans(y0, y1, block) {
+        for (bx0, bx1) in block_spans(x0, x1, block) {
+            let mut sum = [0u64; 4];
+            for y in by0..by1 {
+                for x in bx0..bx1 {
+                    let p = img.get_pixel(x, y).0;
+                    for (s, v) in sum.iter_mut().zip(p) {
+                        *s += u64::from(v);
+                    }
+                }
+            }
+            let n = u64::from((bx1 - bx0) * (by1 - by0)).max(1);
+            // Rounded mean; it is at most 255 because each term is.
+            let mean = sum.map(|s| ((s + n / 2) / n).min(255) as u8);
+            for y in by0..by1 {
+                for x in bx0..bx1 {
+                    img.put_pixel(x, y, image::Rgba(mean));
+                }
+            }
+        }
+    }
+}
+
+/// Blend `rgb` over `region` at `alpha` (0 = unchanged, 255 = solid), leaving the alpha channel
+/// as it was: a translucent highlighter. `region` is clamped to the image; pixels outside it are
+/// untouched. Pure, like [`pixelate`].
+pub fn blend_rect(img: &RgbaImage, region: Rect, rgb: [u8; 3], alpha: u8) -> RgbaImage {
+    let mut out = img.clone();
+    blend_rect_in_place(&mut out, region, rgb, alpha);
+    out
+}
+
+/// [`blend_rect`] on a buffer the caller owns.
+pub fn blend_rect_in_place(img: &mut RgbaImage, region: Rect, rgb: [u8; 3], alpha: u8) {
+    let Some((x0, y0, x1, y1)) = clamp_region(img, region) else {
+        return;
+    };
+    let a = u32::from(alpha);
+    for y in y0..y1 {
+        for x in x0..x1 {
+            let p = img.get_pixel_mut(x, y);
+            for (c, top) in p.0.iter_mut().zip(rgb) {
+                // Rounded (top·a + below·(255−a)) / 255, which is at most 255.
+                *c = ((u32::from(top) * a + u32::from(*c) * (255 - a) + 127) / 255) as u8;
+            }
+        }
+    }
+}
+
+/// `region` ∩ the image as `(x0, y0, x1, y1)` (exclusive ends), or `None` when they don't meet.
+fn clamp_region(img: &RgbaImage, region: Rect) -> Option<(u32, u32, u32, u32)> {
+    let w = i32::try_from(img.width()).unwrap_or(i32::MAX);
+    let h = i32::try_from(img.height()).unwrap_or(i32::MAX);
+    let r = region.intersect(&Rect::new(0, 0, w, h))?;
+    // The intersection lies inside the image, so every coordinate is non-negative.
+    Some((
+        r.left() as u32,
+        r.top() as u32,
+        r.right() as u32,
+        r.bottom() as u32,
+    ))
+}
+
+/// Split `start..end` into runs of `block`; a remainder shorter than half a block joins the last
+/// run instead of standing alone.
+fn block_spans(start: u32, end: u32, block: u32) -> Vec<(u32, u32)> {
+    let mut spans = Vec::new();
+    let mut a = start;
+    while a < end {
+        let b = (a + block).min(end);
+        let tail = end - b;
+        if tail > 0 && tail < block.div_ceil(2) {
+            spans.push((a, end));
+            break;
+        }
+        spans.push((a, b));
+        a = b;
+    }
+    spans
+}
+
 /// Downscale (never upscale) to fit within `max_dim` on the longer edge, preserving aspect.
 pub fn thumbnail(img: &RgbaImage, max_dim: u32) -> RgbaImage {
     let (w, h) = (img.width(), img.height());
@@ -866,5 +972,196 @@ mod tests {
         ));
         assert_eq!(codec.io_error().and_then(|e| e.raw_os_error()), Some(112));
         assert!(ImagingError::FrameTooSmall.io_error().is_none());
+    }
+
+    /// A `w × h` image where every pixel has a different colour (a gradient plus noise), so any
+    /// detail that survives pixelation would show as unequal pixels.
+    fn detailed(w: u32, h: u32) -> RgbaImage {
+        RgbaImage::from_fn(w, h, |x, y| {
+            let n = (x * 7919 + y * 104_729) % 251;
+            image::Rgba([(x * 9 % 256) as u8, (y * 13 % 256) as u8, n as u8, 255])
+        })
+    }
+
+    /// Every pixel of `img` in the `[x0, x1) × [y0, y1)` box.
+    fn pixels_in(img: &RgbaImage, x0: u32, y0: u32, x1: u32, y1: u32) -> Vec<[u8; 4]> {
+        let mut v = Vec::new();
+        for y in y0..y1 {
+            for x in x0..x1 {
+                v.push(img.get_pixel(x, y).0);
+            }
+        }
+        v
+    }
+
+    fn all_equal(px: &[[u8; 4]]) -> bool {
+        px.windows(2).all(|w| w[0] == w[1])
+    }
+
+    #[test]
+    fn pixelate_makes_every_pixel_of_a_block_equal() {
+        let src = detailed(64, 48);
+        let out = pixelate(&src, Rect::new(8, 8, 40, 32), 8);
+        for by in 0..4 {
+            for bx in 0..5 {
+                let (x0, y0) = (8 + bx * 8, 8 + by * 8);
+                let block = pixels_in(&out, x0, y0, x0 + 8, y0 + 8);
+                assert!(all_equal(&block), "block ({bx},{by}) is not uniform");
+            }
+        }
+        // Neighbouring blocks differ (the source is a gradient), so it is not one flat fill.
+        assert_ne!(out.get_pixel(8, 8), out.get_pixel(40, 32));
+    }
+
+    #[test]
+    fn pixelate_uses_the_rounded_block_mean() {
+        // One 2×2 block with values 0, 1, 2, 3 per channel -> mean 1.5 -> rounds to 2.
+        let src = RgbaImage::from_fn(2, 2, |x, y| {
+            let v = (y * 2 + x) as u8;
+            image::Rgba([v, v * 10, 255 - v, 255])
+        });
+        let out = pixelate(&src, Rect::new(0, 0, 2, 2), 2);
+        assert!(out.pixels().all(|p| p.0 == [2, 15, 254, 255]));
+    }
+
+    #[test]
+    fn pixelate_leaves_pixels_outside_the_region_untouched() {
+        let src = detailed(64, 48);
+        let region = Rect::new(10, 12, 30, 20);
+        let out = pixelate(&src, region, 6);
+        for y in 0..48 {
+            for x in 0..64 {
+                let inside = region.contains(capture_core::Point::new(x as i32, y as i32));
+                if !inside {
+                    assert_eq!(
+                        out.get_pixel(x, y),
+                        src.get_pixel(x, y),
+                        "({x},{y}) changed"
+                    );
+                }
+            }
+        }
+        assert_ne!(
+            pixels_in(&out, 10, 12, 40, 32),
+            pixels_in(&src, 10, 12, 40, 32),
+            "the region itself was redacted"
+        );
+    }
+
+    #[test]
+    fn pixelate_clamps_the_region_to_the_image() {
+        let src = detailed(20, 16);
+        // Hangs off the top-left and the bottom-right: only the image part is processed.
+        let out = pixelate(&src, Rect::new(-10, -10, 100, 100), 4);
+        assert_eq!((out.width(), out.height()), (20, 16));
+        // Blocks are anchored at the clamped origin (0,0).
+        for by in 0..4 {
+            for bx in 0..5 {
+                let b = pixels_in(&out, bx * 4, by * 4, bx * 4 + 4, by * 4 + 4);
+                assert!(all_equal(&b), "block ({bx},{by}) is not uniform");
+            }
+        }
+        // Entirely outside, or empty: nothing changes and nothing panics.
+        assert_eq!(pixelate(&src, Rect::new(50, 50, 10, 10), 4), src);
+        assert_eq!(pixelate(&src, Rect::new(-30, 0, 10, 10), 4), src);
+        assert_eq!(pixelate(&src, Rect::new(2, 2, 0, 5), 4), src);
+    }
+
+    #[test]
+    fn pixelate_is_irreversible_different_details_give_the_same_output() {
+        // Two different 4×4 patches with the same mean: after pixelation they are identical,
+        // so no inverse can tell which one it came from.
+        let a = RgbaImage::from_fn(4, 4, |x, _| {
+            let v = if x % 2 == 0 { 0 } else { 200 };
+            image::Rgba([v, v, v, 255])
+        });
+        let b = RgbaImage::from_fn(4, 4, |_, y| {
+            let v = if y < 2 { 200 } else { 0 };
+            image::Rgba([v, v, v, 255])
+        });
+        assert_ne!(a, b);
+        let full = Rect::new(0, 0, 4, 4);
+        assert_eq!(pixelate(&a, full, 4), pixelate(&b, full, 4));
+        assert!(pixelate(&a, full, 4)
+            .pixels()
+            .all(|p| p.0 == [100, 100, 100, 255]));
+    }
+
+    #[test]
+    fn pixelate_never_uses_a_block_that_keeps_detail() {
+        let src = detailed(8, 8);
+        let full = Rect::new(0, 0, 8, 8);
+        // 0 and 1 would be a no-op; they are raised to the minimum block.
+        for tiny in [0, 1] {
+            let out = pixelate(&src, full, tiny);
+            assert_ne!(out, src, "block {tiny} must still redact");
+            assert_eq!(out, pixelate(&src, full, MIN_PIXELATE_BLOCK));
+        }
+    }
+
+    #[test]
+    fn pixelate_merges_a_thin_edge_strip_into_the_last_block() {
+        // 13 px wide with 6 px blocks: 6 + 7 (the 1-px leftover joins the last block), not
+        // 6 + 6 + a 1-px sliver that would keep a column of detail.
+        let src = detailed(13, 6);
+        let out = pixelate(&src, Rect::new(0, 0, 13, 6), 6);
+        assert!(all_equal(&pixels_in(&out, 6, 0, 13, 6)));
+        // A leftover of at least half a block stays its own block.
+        assert_eq!(block_spans(0, 9, 6), vec![(0, 6), (6, 9)]);
+        assert_eq!(block_spans(0, 8, 6), vec![(0, 8)]);
+        assert_eq!(block_spans(4, 4, 6), vec![]);
+        assert_eq!(block_spans(0, 3, 6), vec![(0, 3)]);
+    }
+
+    #[test]
+    fn pixelate_in_place_matches_the_pure_version() {
+        let src = detailed(30, 20);
+        let r = Rect::new(3, 4, 17, 11);
+        let mut buf = src.clone();
+        pixelate_in_place(&mut buf, r, 5);
+        assert_eq!(buf, pixelate(&src, r, 5));
+    }
+
+    #[test]
+    fn blend_rect_mixes_the_colour_in_at_alpha_and_keeps_alpha() {
+        let src = RgbaImage::from_pixel(10, 10, image::Rgba([0, 100, 200, 255]));
+        let out = blend_rect(&src, Rect::new(2, 2, 4, 4), [255, 255, 0], 102);
+        // 255·0.4 + 0·0.6 = 102; 255·0.4 + 100·0.6 = 162; 0·0.4 + 200·0.6 = 120.
+        assert_eq!(out.get_pixel(3, 3).0, [102, 162, 120, 255]);
+        assert_eq!(
+            out.get_pixel(1, 1).0,
+            [0, 100, 200, 255],
+            "outside untouched"
+        );
+        assert_eq!(
+            out.get_pixel(6, 6).0,
+            [0, 100, 200, 255],
+            "right/bottom exclusive"
+        );
+        // Alpha 0 is a no-op, 255 is a solid fill.
+        assert_eq!(blend_rect(&src, Rect::new(0, 0, 10, 10), [9, 9, 9], 0), src);
+        let solid = blend_rect(&src, Rect::new(0, 0, 10, 10), [9, 8, 7], 255);
+        assert!(solid.pixels().all(|p| p.0 == [9, 8, 7, 255]));
+    }
+
+    #[test]
+    fn blend_rect_is_translucent_detail_underneath_survives() {
+        let src = detailed(16, 16);
+        let out = blend_rect(&src, Rect::new(0, 0, 16, 16), [255, 230, 0], 102);
+        assert_ne!(
+            out.get_pixel(3, 4),
+            out.get_pixel(4, 4),
+            "neighbours still differ"
+        );
+    }
+
+    #[test]
+    fn blend_rect_clamps_the_region_to_the_image() {
+        let src = RgbaImage::from_pixel(8, 6, image::Rgba([10, 10, 10, 255]));
+        let out = blend_rect(&src, Rect::new(-5, 3, 100, 100), [250, 250, 250], 255);
+        assert_eq!((out.width(), out.height()), (8, 6));
+        assert_eq!(out.get_pixel(0, 2).0, [10, 10, 10, 255]);
+        assert_eq!(out.get_pixel(7, 5).0, [250, 250, 250, 255]);
+        assert_eq!(blend_rect(&src, Rect::new(9, 0, 4, 4), [0, 0, 0], 255), src);
     }
 }
