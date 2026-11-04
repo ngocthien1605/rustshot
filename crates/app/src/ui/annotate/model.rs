@@ -4,19 +4,24 @@
 //!
 //! All coordinates in the model are **image pixels** (top-left origin).
 //!
-//! Items come in two layers. *Pixel* items ([`Item::Pixelate`]) change the screenshot's pixels
-//! themselves ([`apply_pixel_layer`]); the window then draws the *vector* items (outlines, text)
-//! on top. Save and Copy export both layers, so a redaction is part of the file, not an overlay
+//! Items come in two layers. *Pixel* items ([`Item::Pixelate`], [`Item::Highlight`]) change the
+//! screenshot's pixels themselves ([`apply_pixel_layer`]); the window then draws the *vector*
+//! items (outlines, arrows, text) on top. Save and Copy export both layers, so a redaction is part of the file, not an overlay
 //! that could be lifted off.
 
 use capture_core::{Point, Rect};
 use imaging::Rgba;
 
-/// A drag must cover at least this many image pixels on both axes to count as a shape.
+/// A drag must cover at least this many image pixels on both axes to count as a shape (an
+/// arrow: at least this long).
 pub const MIN_SIZE: i32 = 6;
 
 /// Pixelate block size in image pixels: large enough that text inside a block is not legible.
 pub const PIXELATE_BLOCK: u32 = 12;
+
+/// Highlighter colour and opacity (102/255 = 40 %): the text underneath stays readable.
+pub const HIGHLIGHT_RGB: [u8; 3] = [255, 230, 0];
+pub const HIGHLIGHT_ALPHA: u8 = 102;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tool {
@@ -24,6 +29,13 @@ pub enum Tool {
     Rect,
     /// Draw a red rectangle, then type text inside it.
     Text,
+    /// Drag from the tail to the point of an arrow.
+    // Not reachable from the toolbar until the window wires the new tools in.
+    #[allow(dead_code)]
+    Arrow,
+    /// Drag a translucent highlighter box over the screenshot.
+    #[allow(dead_code)]
+    Highlight,
     /// Drag a rectangle whose pixels are pixelated (irreversibly) in the saved/copied image.
     // Not reachable from the toolbar until the window wires the new tools in.
     #[allow(dead_code)]
@@ -38,6 +50,13 @@ pub enum Item {
         rect: Rect,
         text: String,
     },
+    /// An arrow whose point is at `to`.
+    Arrow {
+        from: Point,
+        to: Point,
+    },
+    /// A translucent highlighter box, blended into the pixels by [`apply_pixel_layer`].
+    Highlight(Rect),
     /// A redacted area: pixelated in [`PIXELATE_BLOCK`] squares by [`apply_pixel_layer`].
     Pixelate(Rect),
 }
@@ -102,6 +121,22 @@ impl Editor {
         self.drag.map(|(a, b)| self.normalized(a, b))
     }
 
+    /// What the current drag would commit, to draw it live: the tool's own shape (an arrow, a
+    /// highlight, a pixelate area; an outline for the Text tool's box). Shown at any size,
+    /// although a drag below [`MIN_SIZE`] is discarded on release.
+    // Used by the window from the wiring commit on.
+    #[allow(dead_code)]
+    pub fn preview(&self) -> Option<Item> {
+        let (a, b) = self.drag?;
+        let r = self.normalized(a, b);
+        Some(match self.tool {
+            Tool::Rect | Tool::Text => Item::Rect(r),
+            Tool::Arrow => Item::Arrow { from: a, to: b },
+            Tool::Highlight => Item::Highlight(r),
+            Tool::Pixelate => Item::Pixelate(r),
+        })
+    }
+
     /// Switch tool. Any text being typed is committed first (or dropped if empty).
     pub fn set_tool(&mut self, tool: Tool) {
         self.commit_typing();
@@ -123,20 +158,29 @@ impl Editor {
         }
     }
 
-    /// Finish the drag. A big-enough rectangle is committed (Rect, Pixelate) or turned into a
-    /// text box awaiting typing (Text tool); a tiny one — an accidental click — is discarded.
+    /// Finish the drag. A big-enough shape is committed (or, for the Text tool, becomes a text
+    /// box awaiting typing); a tiny one — an accidental click — is discarded. Boxes need
+    /// [`MIN_SIZE`] on both axes, an arrow needs that length (a level arrow has no height).
     pub fn on_up(&mut self, p: Point) {
         self.on_move(p);
         let Some((a, b)) = self.drag.take() else {
             return;
         };
+        if self.tool == Tool::Arrow {
+            if arrow_long_enough(a, b) {
+                self.items.push(Item::Arrow { from: a, to: b });
+            }
+            return;
+        }
         let r = self.normalized(a, b);
         if r.width < MIN_SIZE || r.height < MIN_SIZE {
             return;
         }
         match self.tool {
             Tool::Rect => self.items.push(Item::Rect(r)),
+            Tool::Highlight => self.items.push(Item::Highlight(r)),
             Tool::Pixelate => self.items.push(Item::Pixelate(r)),
+            Tool::Arrow => {} // handled above
             Tool::Text => {
                 self.typing = Some(Typing {
                     rect: r,
@@ -217,17 +261,75 @@ impl Editor {
     }
 }
 
-/// The screenshot with the pixel items of `items` applied in order (each pixelate sees the
-/// result of the ones before it). Vector items are ignored: the window draws them on top. Pure,
-/// so the redaction that Save and Copy export is unit-tested here.
+/// The screenshot with the pixel items of `items` applied in order (a pixelate drawn over a
+/// highlight pixelates the highlight too, and the other way round). Vector items are ignored:
+/// the window draws them on top. Pure, so what Save and Copy export is unit-tested here.
 pub fn apply_pixel_layer(img: &Rgba, items: &[Item]) -> Rgba {
     let mut out = img.clone();
     for item in items {
-        if let Item::Pixelate(r) = item {
-            imaging::pixelate_in_place(&mut out, *r, PIXELATE_BLOCK);
+        match item {
+            Item::Pixelate(r) => imaging::pixelate_in_place(&mut out, *r, PIXELATE_BLOCK),
+            Item::Highlight(r) => {
+                imaging::blend_rect_in_place(&mut out, *r, HIGHLIGHT_RGB, HIGHLIGHT_ALPHA)
+            }
+            Item::Rect(_) | Item::Text { .. } | Item::Arrow { .. } => {}
         }
     }
     out
+}
+
+/// An arrow counts once it is at least [`MIN_SIZE`] long, in any direction.
+pub fn arrow_long_enough(from: Point, to: Point) -> bool {
+    let (dx, dy) = (i64::from(to.x - from.x), i64::from(to.y - from.y));
+    dx * dx + dy * dy >= i64::from(MIN_SIZE) * i64::from(MIN_SIZE)
+}
+
+/// Where to draw an arrow: a filled triangle `tip`–`left`–`right` and a shaft from the tail to
+/// `shaft_end`, the middle of the triangle's base (so a thick shaft never pokes past the point).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ArrowGeom {
+    pub tail: Point,
+    pub shaft_end: Point,
+    pub tip: Point,
+    pub left: Point,
+    pub right: Point,
+}
+
+/// Arrow head length per pixel of line width, and its bounds: at least 14 px so a thin arrow
+/// still reads as one, at most half the arrow so a short one keeps a visible shaft.
+const HEAD_PER_WIDTH: f64 = 4.5;
+const HEAD_MIN: f64 = 14.0;
+/// Half the head's base width over its length (≈ 27° each side of the shaft).
+const HEAD_SPREAD: f64 = 0.5;
+
+/// The geometry of an arrow from `from` to `to` drawn with a `width`-px line. Pure.
+pub fn arrow_geometry(from: Point, to: Point, width: i32) -> ArrowGeom {
+    let (dx, dy) = (f64::from(to.x - from.x), f64::from(to.y - from.y));
+    let len = dx.hypot(dy);
+    if len < 1.0 {
+        return ArrowGeom {
+            tail: from,
+            shaft_end: to,
+            tip: to,
+            left: to,
+            right: to,
+        };
+    }
+    let (ux, uy) = (dx / len, dy / len);
+    let head = (HEAD_PER_WIDTH * f64::from(width.max(1)))
+        .max(HEAD_MIN)
+        .min(len / 2.0);
+    let (bx, by) = (f64::from(to.x) - ux * head, f64::from(to.y) - uy * head);
+    // The normal (-uy, ux) spreads the barbs to either side of the base point.
+    let half = head * HEAD_SPREAD;
+    let pt = |x: f64, y: f64| Point::new(x.round() as i32, y.round() as i32);
+    ArrowGeom {
+        tail: from,
+        shaft_end: pt(bx, by),
+        tip: to,
+        left: pt(bx - uy * half, by + ux * half),
+        right: pt(bx + uy * half, by - ux * half),
+    }
 }
 
 /// What pressing Enter does while typing in a text box.
@@ -623,5 +725,172 @@ mod tests {
             apply_pixel_layer(&src, &[Item::Rect(Rect::new(1, 1, 8, 8))]),
             src
         );
+    }
+
+    #[test]
+    fn arrow_tool_keeps_the_drag_direction_tail_to_point() {
+        let mut e = Editor::new(200, 100);
+        e.set_tool(Tool::Arrow);
+        drag(&mut e, (150, 80), (20, 10)); // drawn up-left: the point is where the drag ends
+        assert_eq!(
+            e.items(),
+            &[Item::Arrow {
+                from: Point::new(150, 80),
+                to: Point::new(20, 10)
+            }]
+        );
+    }
+
+    #[test]
+    fn arrow_min_size_is_a_length_so_level_arrows_count() {
+        let mut e = Editor::new(200, 100);
+        e.set_tool(Tool::Arrow);
+        drag(&mut e, (10, 50), (10 + MIN_SIZE, 50)); // perfectly level, zero height
+        drag(&mut e, (10, 10), (10, 10 + MIN_SIZE)); // perfectly upright
+        drag(&mut e, (50, 50), (55, 55)); // 7.07 px diagonal, under MIN_SIZE on each axis
+        assert_eq!(e.items().len(), 3);
+        drag(&mut e, (80, 80), (84, 84)); // 5.66 px: an accidental click
+        drag(&mut e, (90, 90), (90 + MIN_SIZE - 1, 90));
+        assert_eq!(e.items().len(), 3);
+        assert!(arrow_long_enough(
+            Point::new(0, 0),
+            Point::new(0, -MIN_SIZE)
+        ));
+        assert!(!arrow_long_enough(Point::new(3, 3), Point::new(3, 3)));
+    }
+
+    #[test]
+    fn arrow_is_clamped_to_the_image() {
+        let mut e = Editor::new(200, 100);
+        e.set_tool(Tool::Arrow);
+        drag(&mut e, (-50, 50), (400, -9));
+        assert_eq!(
+            e.items(),
+            &[Item::Arrow {
+                from: Point::new(0, 50),
+                to: Point::new(199, 0)
+            }]
+        );
+    }
+
+    #[test]
+    fn highlight_tool_commits_a_normalized_box_with_the_min_size_rule() {
+        let mut e = Editor::new(200, 100);
+        e.set_tool(Tool::Highlight);
+        drag(&mut e, (90, 40), (10, 30));
+        assert_eq!(e.items(), &[Item::Highlight(Rect::new(10, 30, 80, 10))]);
+        drag(&mut e, (10, 60), (150, 60 + MIN_SIZE - 1)); // a long but too-thin stroke
+        assert_eq!(e.items().len(), 1);
+    }
+
+    #[test]
+    fn undo_removes_arrows_and_highlights_and_cancels_their_drags() {
+        let mut e = Editor::new(200, 100);
+        e.set_tool(Tool::Highlight);
+        drag(&mut e, (10, 10), (60, 30));
+        e.set_tool(Tool::Arrow);
+        drag(&mut e, (10, 80), (90, 80));
+        e.on_down(Point::new(100, 10));
+        e.on_move(Point::new(150, 50));
+        e.undo(); // only cancels the arrow being drawn
+        assert_eq!(e.items().len(), 2);
+        assert!(e.preview().is_none());
+        e.undo();
+        assert_eq!(e.items(), &[Item::Highlight(Rect::new(10, 10, 50, 20))]);
+        e.undo();
+        assert!(e.items().is_empty());
+    }
+
+    #[test]
+    fn preview_shows_the_current_tools_shape() {
+        let mut e = Editor::new(200, 100);
+        assert_eq!(e.preview(), None);
+        let cases = [
+            (Tool::Rect, Item::Rect(Rect::new(10, 10, 40, 20))),
+            (Tool::Text, Item::Rect(Rect::new(10, 10, 40, 20))),
+            (Tool::Highlight, Item::Highlight(Rect::new(10, 10, 40, 20))),
+            (Tool::Pixelate, Item::Pixelate(Rect::new(10, 10, 40, 20))),
+            (
+                Tool::Arrow,
+                Item::Arrow {
+                    from: Point::new(50, 30),
+                    to: Point::new(10, 10),
+                },
+            ),
+        ];
+        for (tool, want) in cases {
+            e.set_tool(tool);
+            e.on_down(Point::new(50, 30));
+            e.on_move(Point::new(10, 10));
+            assert_eq!(e.preview(), Some(want), "{tool:?}");
+            e.on_escape();
+        }
+    }
+
+    fn dist(a: Point, b: Point) -> f64 {
+        f64::from(a.x - b.x).hypot(f64::from(a.y - b.y))
+    }
+
+    #[test]
+    fn arrow_head_points_at_the_end_and_is_symmetric() {
+        let g = arrow_geometry(Point::new(10, 50), Point::new(110, 50), 3);
+        assert_eq!((g.tail, g.tip), (Point::new(10, 50), Point::new(110, 50)));
+        // Level arrow: base 14 px (the minimum head) behind the tip, barbs 7 px either side.
+        assert_eq!(g.shaft_end, Point::new(96, 50));
+        assert_eq!((g.left, g.right), (Point::new(96, 57), Point::new(96, 43)));
+
+        // Any direction: the barbs mirror each other about the shaft.
+        let g = arrow_geometry(Point::new(0, 0), Point::new(-60, 80), 6);
+        assert!((dist(g.tip, g.left) - dist(g.tip, g.right)).abs() <= 1.0);
+        let mid = Point::new((g.left.x + g.right.x) / 2, (g.left.y + g.right.y) / 2);
+        assert!(
+            dist(mid, g.shaft_end) <= 1.0,
+            "base centre sits on the shaft"
+        );
+        assert!(dist(g.tail, g.shaft_end) < dist(g.tail, g.tip));
+    }
+
+    #[test]
+    fn arrow_head_grows_with_width_but_leaves_a_shaft() {
+        let head = |w: i32, len: i32| {
+            let g = arrow_geometry(Point::new(0, 0), Point::new(len, 0), w);
+            len - g.shaft_end.x
+        };
+        assert_eq!(head(2, 200), 14, "thin lines get the minimum head");
+        assert_eq!(head(6, 200), 27, "4.5 × width");
+        assert!(head(8, 200) > head(6, 200));
+        assert_eq!(head(6, 20), 10, "never more than half the arrow");
+    }
+
+    #[test]
+    fn a_zero_length_arrow_has_degenerate_but_finite_geometry() {
+        let p = Point::new(7, 9);
+        let g = arrow_geometry(p, p, 3);
+        assert_eq!((g.shaft_end, g.tip, g.left, g.right), (p, p, p, p));
+    }
+
+    #[test]
+    fn pixel_layer_blends_highlights_translucently() {
+        let src = Rgba::from_raw(20, 20, vec![0; 20 * 20 * 4]).unwrap();
+        let out = apply_pixel_layer(&src, &[Item::Highlight(Rect::new(5, 5, 10, 10))]);
+        let a = u32::from(HIGHLIGHT_ALPHA);
+        let want = HIGHLIGHT_RGB.map(|c| ((u32::from(c) * a + 127) / 255) as u8);
+        assert_eq!(out.get_pixel(5, 5).0[..3], want);
+        assert_eq!(out.get_pixel(14, 14).0[..3], want);
+        assert_eq!(out.get_pixel(4, 5).0, [0, 0, 0, 0], "outside untouched");
+        assert_eq!(out.get_pixel(15, 15).0, [0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn pixel_items_apply_in_order() {
+        let src = detailed(24, 24);
+        let all = Rect::new(0, 0, 24, 24);
+        let hl_then_px = apply_pixel_layer(&src, &[Item::Highlight(all), Item::Pixelate(all)]);
+        let px_then_hl = apply_pixel_layer(&src, &[Item::Pixelate(all), Item::Highlight(all)]);
+        assert_ne!(hl_then_px, px_then_hl);
+        // Either way the area is redacted: one 12-px block is one colour.
+        for out in [&hl_then_px, &px_then_hl] {
+            assert_eq!(out.get_pixel(0, 0), out.get_pixel(11, 11));
+        }
     }
 }

@@ -305,6 +305,32 @@ pub fn pixelate_in_place(img: &mut RgbaImage, region: Rect, block: u32) {
     }
 }
 
+/// Blend `rgb` over `region` at `alpha` (0 = unchanged, 255 = solid), leaving the alpha channel
+/// as it was: a translucent highlighter. `region` is clamped to the image; pixels outside it are
+/// untouched. Pure, like [`pixelate`].
+pub fn blend_rect(img: &RgbaImage, region: Rect, rgb: [u8; 3], alpha: u8) -> RgbaImage {
+    let mut out = img.clone();
+    blend_rect_in_place(&mut out, region, rgb, alpha);
+    out
+}
+
+/// [`blend_rect`] on a buffer the caller owns.
+pub fn blend_rect_in_place(img: &mut RgbaImage, region: Rect, rgb: [u8; 3], alpha: u8) {
+    let Some((x0, y0, x1, y1)) = clamp_region(img, region) else {
+        return;
+    };
+    let a = u32::from(alpha);
+    for y in y0..y1 {
+        for x in x0..x1 {
+            let p = img.get_pixel_mut(x, y);
+            for (c, top) in p.0.iter_mut().zip(rgb) {
+                // Rounded (top·a + below·(255−a)) / 255, which is at most 255.
+                *c = ((u32::from(top) * a + u32::from(*c) * (255 - a) + 127) / 255) as u8;
+            }
+        }
+    }
+}
+
 /// `region` ∩ the image as `(x0, y0, x1, y1)` (exclusive ends), or `None` when they don't meet.
 fn clamp_region(img: &RgbaImage, region: Rect) -> Option<(u32, u32, u32, u32)> {
     let w = i32::try_from(img.width()).unwrap_or(i32::MAX);
@@ -1094,5 +1120,48 @@ mod tests {
         let mut buf = src.clone();
         pixelate_in_place(&mut buf, r, 5);
         assert_eq!(buf, pixelate(&src, r, 5));
+    }
+
+    #[test]
+    fn blend_rect_mixes_the_colour_in_at_alpha_and_keeps_alpha() {
+        let src = RgbaImage::from_pixel(10, 10, image::Rgba([0, 100, 200, 255]));
+        let out = blend_rect(&src, Rect::new(2, 2, 4, 4), [255, 255, 0], 102);
+        // 255·0.4 + 0·0.6 = 102; 255·0.4 + 100·0.6 = 162; 0·0.4 + 200·0.6 = 120.
+        assert_eq!(out.get_pixel(3, 3).0, [102, 162, 120, 255]);
+        assert_eq!(
+            out.get_pixel(1, 1).0,
+            [0, 100, 200, 255],
+            "outside untouched"
+        );
+        assert_eq!(
+            out.get_pixel(6, 6).0,
+            [0, 100, 200, 255],
+            "right/bottom exclusive"
+        );
+        // Alpha 0 is a no-op, 255 is a solid fill.
+        assert_eq!(blend_rect(&src, Rect::new(0, 0, 10, 10), [9, 9, 9], 0), src);
+        let solid = blend_rect(&src, Rect::new(0, 0, 10, 10), [9, 8, 7], 255);
+        assert!(solid.pixels().all(|p| p.0 == [9, 8, 7, 255]));
+    }
+
+    #[test]
+    fn blend_rect_is_translucent_detail_underneath_survives() {
+        let src = detailed(16, 16);
+        let out = blend_rect(&src, Rect::new(0, 0, 16, 16), [255, 230, 0], 102);
+        assert_ne!(
+            out.get_pixel(3, 4),
+            out.get_pixel(4, 4),
+            "neighbours still differ"
+        );
+    }
+
+    #[test]
+    fn blend_rect_clamps_the_region_to_the_image() {
+        let src = RgbaImage::from_pixel(8, 6, image::Rgba([10, 10, 10, 255]));
+        let out = blend_rect(&src, Rect::new(-5, 3, 100, 100), [250, 250, 250], 255);
+        assert_eq!((out.width(), out.height()), (8, 6));
+        assert_eq!(out.get_pixel(0, 2).0, [10, 10, 10, 255]);
+        assert_eq!(out.get_pixel(7, 5).0, [250, 250, 250, 255]);
+        assert_eq!(blend_rect(&src, Rect::new(9, 0, 4, 4), [0, 0, 0], 255), src);
     }
 }

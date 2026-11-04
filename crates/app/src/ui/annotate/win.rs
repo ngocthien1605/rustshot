@@ -15,14 +15,14 @@ use anyhow::{anyhow, Context, Result};
 use capture_core::{Point, Rect};
 use imaging::Rgba;
 use windows::core::{w, HSTRING, PCWSTR};
-use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, RECT, WPARAM};
+use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
     BeginPaint, BitBlt, CreateFontW, CreatePen, CreateSolidBrush, DeleteObject, DrawTextW,
-    EndPaint, FillRect, GdiFlush, GetStockObject, IntersectClipRect, InvalidateRect, Rectangle,
-    RestoreDC, SaveDC, SelectObject, SetBkMode, SetStretchBltMode, SetTextColor, StretchBlt,
-    CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, DEFAULT_CHARSET, DT_NOPREFIX, DT_WORDBREAK, HALFTONE,
-    HDC, HGDIOBJ, HOLLOW_BRUSH, OUT_DEFAULT_PRECIS, PAINTSTRUCT, PS_INSIDEFRAME, SRCCOPY,
-    TRANSPARENT,
+    EndPaint, FillRect, GdiFlush, GetStockObject, IntersectClipRect, InvalidateRect, LineTo,
+    MoveToEx, Polygon, Rectangle, RestoreDC, SaveDC, SelectObject, SetBkMode, SetStretchBltMode,
+    SetTextColor, StretchBlt, CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, DEFAULT_CHARSET, DT_NOPREFIX,
+    DT_WORDBREAK, HALFTONE, HDC, HGDIOBJ, HOLLOW_BRUSH, OUT_DEFAULT_PRECIS, PAINTSTRUCT,
+    PS_INSIDEFRAME, PS_SOLID, SRCCOPY, TRANSPARENT,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Controls::CheckRadioButton;
@@ -44,8 +44,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use crate::platform::gdi::{ScreenDc, Surface};
 
 use super::model::{
-    apply_pixel_layer, enter_action, font_px, Editor, EnterAction, EscapeResult, Item, Tool,
-    Typing, View,
+    apply_pixel_layer, arrow_geometry, enter_action, font_px, Editor, EnterAction, EscapeResult,
+    Item, Tool, Typing, View,
 };
 
 const CLASS_NAME: PCWSTR = w!("RustShotAnnotate");
@@ -652,8 +652,9 @@ fn paint_items(
                     outline(*rect);
                     draw_text(hdc, *rect, text, view);
                 }
+                Item::Arrow { from, to } => draw_arrow(hdc, *from, *to, view),
                 // Pixel items are already in the pixels (`apply_pixel_layer`), not drawn here.
-                Item::Pixelate(_) => {}
+                Item::Highlight(_) | Item::Pixelate(_) => {}
             }
         }
         if let Some(r) = preview {
@@ -668,6 +669,32 @@ fn paint_items(
         SelectObject(hdc, old_pen);
         SelectObject(hdc, old_brush);
         let _ = DeleteObject(HGDIOBJ(pen.0));
+    }
+}
+
+/// A red arrow with a filled head ([`arrow_geometry`]); the shaft uses the pen selected in `hdc`.
+fn draw_arrow(hdc: HDC, from: Point, to: Point, view: View) {
+    let g = arrow_geometry(from, to, LINE_PX);
+    let at = |p: Point| POINT {
+        x: view.ox + view.px(p.x),
+        y: view.oy + view.px(p.y),
+    };
+    let (tail, shaft_end) = (at(g.tail), at(g.shaft_end));
+    let head = [at(g.tip), at(g.left), at(g.right)];
+    // SAFETY: line and polygon drawing on the DC we are given; the brush and the thin pen are
+    // deselected and deleted before returning.
+    unsafe {
+        let _ = MoveToEx(hdc, tail.x, tail.y, None);
+        let _ = LineTo(hdc, shaft_end.x, shaft_end.y);
+        let brush = CreateSolidBrush(RED);
+        let pen = CreatePen(PS_SOLID, 1, RED);
+        let old_brush = SelectObject(hdc, HGDIOBJ(brush.0));
+        let old_pen = SelectObject(hdc, HGDIOBJ(pen.0));
+        let _ = Polygon(hdc, &head);
+        SelectObject(hdc, old_pen);
+        SelectObject(hdc, old_brush);
+        let _ = DeleteObject(HGDIOBJ(pen.0));
+        let _ = DeleteObject(HGDIOBJ(brush.0));
     }
 }
 
@@ -1025,6 +1052,37 @@ mod tests {
         // ...outside it the source is intact, and the outline is still drawn in red.
         assert_eq!(px(&out, 26, 2), px(&src, 26, 2));
         assert_eq!(px(&out, 31, 36), [255, 0, 0, 255]);
+    }
+
+    #[test]
+    fn arrow_is_drawn_red_with_a_filled_head() {
+        let out = render(
+            &white(80, 40),
+            &[Item::Arrow {
+                from: Point::new(5, 20),
+                to: Point::new(60, 20),
+            }],
+        )
+        .unwrap();
+        assert_eq!(px(&out, 20, 20), [255, 0, 0, 255], "shaft");
+        // Head: 14 px long, base at x = 46 spanning y 13..27; (50, 24) is inside it.
+        assert_eq!(px(&out, 50, 24), [255, 0, 0, 255], "filled head");
+        assert_eq!(px(&out, 20, 30), [255, 255, 255, 255], "off the shaft");
+        assert_eq!(px(&out, 70, 20), [255, 255, 255, 255], "past the point");
+    }
+
+    #[test]
+    fn highlight_is_blended_into_the_exported_pixels() {
+        let out = render(
+            &white(40, 40),
+            &[Item::Highlight(Rect::new(10, 10, 20, 20))],
+        )
+        .unwrap();
+        let a = u32::from(super::super::model::HIGHLIGHT_ALPHA);
+        let mix = |c: u8| ((u32::from(c) * a + 255 * (255 - a) + 127) / 255) as u8;
+        let [r, g, b] = super::super::model::HIGHLIGHT_RGB.map(mix);
+        assert_eq!(px(&out, 20, 20), [r, g, b, 255]);
+        assert_eq!(px(&out, 5, 5), [255, 255, 255, 255], "outside untouched");
     }
 
     #[test]
