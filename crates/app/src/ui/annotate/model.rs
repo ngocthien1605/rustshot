@@ -6,8 +6,11 @@
 //!
 //! Items come in two layers. *Pixel* items ([`Item::Pixelate`], [`Item::Highlight`]) change the
 //! screenshot's pixels themselves ([`apply_pixel_layer`]); the window then draws the *vector*
-//! items (outlines, arrows, text) on top. Save and Copy export both layers, so a redaction is part of the file, not an overlay
-//! that could be lifted off.
+//! items (outlines, arrows, text) on top. Save and Copy export both layers, so a redaction is
+//! part of the file, not an overlay that could be lifted off.
+//!
+//! Each tool remembers its own [`Style`] (colour from a small fixed [`Color`] palette, and a
+//! [`Thickness`]); red at medium thickness is the default, as before styles existed.
 
 use capture_core::{Point, Rect};
 use imaging::Rgba;
@@ -19,44 +22,177 @@ pub const MIN_SIZE: i32 = 6;
 /// Pixelate block size in image pixels: large enough that text inside a block is not legible.
 pub const PIXELATE_BLOCK: u32 = 12;
 
-/// Highlighter colour and opacity (102/255 = 40 %): the text underneath stays readable.
-pub const HIGHLIGHT_RGB: [u8; 3] = [255, 230, 0];
+/// Highlighter opacity (102/255 = 40 %): the text underneath stays readable.
 pub const HIGHLIGHT_ALPHA: u8 = 102;
+
+/// The fixed colour palette.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Color {
+    Red,
+    Yellow,
+    Green,
+    Blue,
+    Black,
+    White,
+}
+
+impl Color {
+    /// Every colour, in toolbar order (shortcut keys `1`–`6`).
+    pub const PALETTE: [Color; 6] = [
+        Color::Red,
+        Color::Yellow,
+        Color::Green,
+        Color::Blue,
+        Color::Black,
+        Color::White,
+    ];
+
+    pub fn rgb(self) -> [u8; 3] {
+        match self {
+            Color::Red => [255, 0, 0],
+            Color::Yellow => [255, 230, 0],
+            Color::Green => [0, 160, 60],
+            Color::Blue => [0, 110, 230],
+            Color::Black => [0, 0, 0],
+            Color::White => [255, 255, 255],
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Color::Red => "Red",
+            Color::Yellow => "Yellow",
+            Color::Green => "Green",
+            Color::Blue => "Blue",
+            Color::Black => "Black",
+            Color::White => "White",
+        }
+    }
+}
+
+/// Line thickness of outlines, arrows and text-box borders.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Thickness {
+    Thin,
+    Medium,
+    Thick,
+}
+
+impl Thickness {
+    pub const ALL: [Thickness; 3] = [Thickness::Thin, Thickness::Medium, Thickness::Thick];
+
+    /// Line width in image pixels. Medium is the 3 px the editor always drew.
+    pub fn px(self) -> i32 {
+        match self {
+            Thickness::Thin => 2,
+            Thickness::Medium => 3,
+            Thickness::Thick => 6,
+        }
+    }
+
+    pub fn thinner(self) -> Thickness {
+        match self {
+            Thickness::Thick => Thickness::Medium,
+            Thickness::Medium | Thickness::Thin => Thickness::Thin,
+        }
+    }
+
+    pub fn thicker(self) -> Thickness {
+        match self {
+            Thickness::Thin => Thickness::Medium,
+            Thickness::Medium | Thickness::Thick => Thickness::Thick,
+        }
+    }
+}
+
+/// How a shape is drawn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Style {
+    pub color: Color,
+    pub thickness: Thickness,
+}
+
+impl Style {
+    /// Red, medium: what every shape looked like before there was a palette.
+    pub const DEFAULT: Style = Style {
+        color: Color::Red,
+        thickness: Thickness::Medium,
+    };
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tool {
-    /// Draw a red rectangle outline.
+    /// Draw a rectangle outline.
     Rect,
-    /// Draw a red rectangle, then type text inside it.
+    /// Draw a rectangle, then type text inside it.
     Text,
     /// Drag from the tail to the point of an arrow.
-    // Not reachable from the toolbar until the window wires the new tools in.
-    #[allow(dead_code)]
     Arrow,
     /// Drag a translucent highlighter box over the screenshot.
-    #[allow(dead_code)]
     Highlight,
     /// Drag a rectangle whose pixels are pixelated (irreversibly) in the saved/copied image.
-    // Not reachable from the toolbar until the window wires the new tools in.
-    #[allow(dead_code)]
     Pixelate,
+}
+
+impl Tool {
+    pub const ALL: [Tool; 5] = [
+        Tool::Rect,
+        Tool::Text,
+        Tool::Arrow,
+        Tool::Highlight,
+        Tool::Pixelate,
+    ];
+
+    fn index(self) -> usize {
+        match self {
+            Tool::Rect => 0,
+            Tool::Text => 1,
+            Tool::Arrow => 2,
+            Tool::Highlight => 3,
+            Tool::Pixelate => 4,
+        }
+    }
+
+    /// The style a tool starts with: red, medium — except the highlighter, which is yellow.
+    pub fn default_style(self) -> Style {
+        match self {
+            Tool::Highlight => Style {
+                color: Color::Yellow,
+                ..Style::DEFAULT
+            },
+            _ => Style::DEFAULT,
+        }
+    }
+
+    /// Whether the palette applies (a pixelate area has no colour).
+    pub fn uses_color(self) -> bool {
+        self != Tool::Pixelate
+    }
+
+    /// Whether the thickness applies (a highlight and a pixelate area are filled boxes).
+    pub fn uses_thickness(self) -> bool {
+        matches!(self, Tool::Rect | Tool::Text | Tool::Arrow)
+    }
 }
 
 /// A committed annotation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Item {
-    Rect(Rect),
+    Rect(Rect, Style),
+    /// Text in the style's colour inside a border of the style's thickness.
     Text {
         rect: Rect,
         text: String,
+        style: Style,
     },
     /// An arrow whose point is at `to`.
     Arrow {
         from: Point,
         to: Point,
+        style: Style,
     },
     /// A translucent highlighter box, blended into the pixels by [`apply_pixel_layer`].
-    Highlight(Rect),
+    Highlight(Rect, Color),
     /// A redacted area: pixelated in [`PIXELATE_BLOCK`] squares by [`apply_pixel_layer`].
     Pixelate(Rect),
 }
@@ -66,6 +202,7 @@ pub enum Item {
 pub struct Typing {
     pub rect: Rect,
     pub text: String,
+    pub style: Style,
 }
 
 /// What `Esc` did, so the window knows whether to close.
@@ -83,8 +220,12 @@ pub struct Editor {
     height: i32,
     tool: Tool,
     items: Vec<Item>,
+    /// Items taken back by undo, most recent last; cleared when a new item is committed.
+    redo: Vec<Item>,
     drag: Option<(Point, Point)>,
     typing: Option<Typing>,
+    /// Each tool's style, indexed by [`Tool::index`].
+    styles: [Style; 5],
 }
 
 impl Editor {
@@ -94,8 +235,10 @@ impl Editor {
             height,
             tool: Tool::Rect,
             items: Vec::new(),
+            redo: Vec::new(),
             drag: None,
             typing: None,
+            styles: Tool::ALL.map(Tool::default_style),
         }
     }
 
@@ -116,6 +259,28 @@ impl Editor {
         self.typing.is_some()
     }
 
+    /// The current tool's style (what the next shape will look like).
+    pub fn style(&self) -> Style {
+        self.styles[self.tool.index()]
+    }
+
+    /// Pick a colour for the current tool. A text box being typed takes it too, so the colour
+    /// can be chosen after drawing the box.
+    pub fn set_color(&mut self, color: Color) {
+        self.styles[self.tool.index()].color = color;
+        if let Some(t) = self.typing.as_mut() {
+            t.style.color = color;
+        }
+    }
+
+    /// Pick a thickness for the current tool (and the text box being typed, if any).
+    pub fn set_thickness(&mut self, thickness: Thickness) {
+        self.styles[self.tool.index()].thickness = thickness;
+        if let Some(t) = self.typing.as_mut() {
+            t.style.thickness = thickness;
+        }
+    }
+
     /// The rectangle being rubber-banded right now, if any.
     pub fn drag_rect(&self) -> Option<Rect> {
         self.drag.map(|(a, b)| self.normalized(a, b))
@@ -124,15 +289,18 @@ impl Editor {
     /// What the current drag would commit, to draw it live: the tool's own shape (an arrow, a
     /// highlight, a pixelate area; an outline for the Text tool's box). Shown at any size,
     /// although a drag below [`MIN_SIZE`] is discarded on release.
-    // Used by the window from the wiring commit on.
-    #[allow(dead_code)]
     pub fn preview(&self) -> Option<Item> {
         let (a, b) = self.drag?;
         let r = self.normalized(a, b);
+        let style = self.styles[self.tool.index()];
         Some(match self.tool {
-            Tool::Rect | Tool::Text => Item::Rect(r),
-            Tool::Arrow => Item::Arrow { from: a, to: b },
-            Tool::Highlight => Item::Highlight(r),
+            Tool::Rect | Tool::Text => Item::Rect(r, style),
+            Tool::Arrow => Item::Arrow {
+                from: a,
+                to: b,
+                style,
+            },
+            Tool::Highlight => Item::Highlight(r, style.color),
             Tool::Pixelate => Item::Pixelate(r),
         })
     }
@@ -166,9 +334,14 @@ impl Editor {
         let Some((a, b)) = self.drag.take() else {
             return;
         };
+        let style = self.styles[self.tool.index()];
         if self.tool == Tool::Arrow {
             if arrow_long_enough(a, b) {
-                self.items.push(Item::Arrow { from: a, to: b });
+                self.push(Item::Arrow {
+                    from: a,
+                    to: b,
+                    style,
+                });
             }
             return;
         }
@@ -177,14 +350,15 @@ impl Editor {
             return;
         }
         match self.tool {
-            Tool::Rect => self.items.push(Item::Rect(r)),
-            Tool::Highlight => self.items.push(Item::Highlight(r)),
-            Tool::Pixelate => self.items.push(Item::Pixelate(r)),
+            Tool::Rect => self.push(Item::Rect(r, style)),
+            Tool::Highlight => self.push(Item::Highlight(r, style.color)),
+            Tool::Pixelate => self.push(Item::Pixelate(r)),
             Tool::Arrow => {} // handled above
             Tool::Text => {
                 self.typing = Some(Typing {
                     rect: r,
                     text: String::new(),
+                    style,
                 })
             }
         }
@@ -228,20 +402,54 @@ impl Editor {
         }
     }
 
-    /// Undo: cancel an in-progress shape, otherwise remove the last committed one.
-    pub fn undo(&mut self) {
+    /// Undo: cancel an in-progress shape, otherwise take back the last committed one (it can be
+    /// redone). Returns true when a committed item was taken back.
+    pub fn undo(&mut self) -> bool {
         if self.drag.take().is_some() || self.typing.take().is_some() {
-            return;
+            return false;
         }
-        self.items.pop();
+        match self.items.pop() {
+            Some(item) => {
+                self.redo.push(item);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Redo: put back the item the last undo took. Does nothing while a shape or text box is in
+    /// progress (finish or cancel it first), or once a new item has been committed since the
+    /// undo. Returns true when an item was put back.
+    pub fn redo(&mut self) -> bool {
+        if self.drag.is_some() || self.typing.is_some() {
+            return false;
+        }
+        match self.redo.pop() {
+            Some(item) => {
+                self.items.push(item);
+                true
+            }
+            None => false,
+        }
+    }
+
+    pub fn can_redo(&self) -> bool {
+        !self.redo.is_empty() && self.drag.is_none() && self.typing.is_none()
+    }
+
+    /// Commit a new item. A new item starts a new history branch, so the redo list is dropped.
+    fn push(&mut self, item: Item) {
+        self.redo.clear();
+        self.items.push(item);
     }
 
     fn commit_typing(&mut self) {
         if let Some(t) = self.typing.take() {
             if !t.text.trim().is_empty() {
-                self.items.push(Item::Text {
+                self.push(Item::Text {
                     rect: t.rect,
                     text: t.text,
+                    style: t.style,
                 });
             }
         }
@@ -269,10 +477,10 @@ pub fn apply_pixel_layer(img: &Rgba, items: &[Item]) -> Rgba {
     for item in items {
         match item {
             Item::Pixelate(r) => imaging::pixelate_in_place(&mut out, *r, PIXELATE_BLOCK),
-            Item::Highlight(r) => {
-                imaging::blend_rect_in_place(&mut out, *r, HIGHLIGHT_RGB, HIGHLIGHT_ALPHA)
+            Item::Highlight(r, color) => {
+                imaging::blend_rect_in_place(&mut out, *r, color.rgb(), HIGHLIGHT_ALPHA)
             }
-            Item::Rect(_) | Item::Text { .. } | Item::Arrow { .. } => {}
+            Item::Rect(..) | Item::Text { .. } | Item::Arrow { .. } => {}
         }
     }
     out
@@ -427,7 +635,10 @@ mod tests {
     fn rect_tool_commits_a_normalized_rectangle() {
         let mut e = Editor::new(200, 100);
         drag(&mut e, (80, 60), (20, 10)); // dragged up-left
-        assert_eq!(e.items(), &[Item::Rect(Rect::new(20, 10, 60, 50))]);
+        assert_eq!(
+            e.items(),
+            &[Item::Rect(Rect::new(20, 10, 60, 50), Style::DEFAULT)]
+        );
     }
 
     #[test]
@@ -442,7 +653,10 @@ mod tests {
     fn drag_is_clamped_to_the_image() {
         let mut e = Editor::new(200, 100);
         drag(&mut e, (-30, -30), (500, 500));
-        assert_eq!(e.items(), &[Item::Rect(Rect::new(0, 0, 199, 99))]);
+        assert_eq!(
+            e.items(),
+            &[Item::Rect(Rect::new(0, 0, 199, 99), Style::DEFAULT)]
+        );
     }
 
     #[test]
@@ -472,7 +686,8 @@ mod tests {
             e.items(),
             &[Item::Text {
                 rect: Rect::new(10, 10, 100, 40),
-                text: "Hello".into()
+                text: "Hello".into(),
+                style: Style::DEFAULT,
             }]
         );
     }
@@ -517,7 +732,8 @@ mod tests {
             e.items(),
             &[Item::Text {
                 rect: Rect::new(10, 10, 100, 40),
-                text: "line1\nline2".into()
+                text: "line1\nline2".into(),
+                style: Style::DEFAULT,
             }]
         );
     }
@@ -689,11 +905,12 @@ mod tests {
         let src = detailed(60, 40);
         let area = Rect::new(0, 0, 24, 24);
         let items = [
-            Item::Rect(Rect::new(30, 5, 20, 20)),
+            Item::Rect(Rect::new(30, 5, 20, 20), Style::DEFAULT),
             Item::Pixelate(area),
             Item::Text {
                 rect: Rect::new(30, 25, 25, 10),
                 text: "x".into(),
+                style: Style::DEFAULT,
             },
         ];
         let out = apply_pixel_layer(&src, &items);
@@ -722,7 +939,7 @@ mod tests {
         let src = detailed(20, 10);
         assert_eq!(apply_pixel_layer(&src, &[]), src);
         assert_eq!(
-            apply_pixel_layer(&src, &[Item::Rect(Rect::new(1, 1, 8, 8))]),
+            apply_pixel_layer(&src, &[Item::Rect(Rect::new(1, 1, 8, 8), Style::DEFAULT)]),
             src
         );
     }
@@ -736,7 +953,8 @@ mod tests {
             e.items(),
             &[Item::Arrow {
                 from: Point::new(150, 80),
-                to: Point::new(20, 10)
+                to: Point::new(20, 10),
+                style: Style::DEFAULT,
             }]
         );
     }
@@ -768,7 +986,8 @@ mod tests {
             e.items(),
             &[Item::Arrow {
                 from: Point::new(0, 50),
-                to: Point::new(199, 0)
+                to: Point::new(199, 0),
+                style: Style::DEFAULT,
             }]
         );
     }
@@ -778,7 +997,10 @@ mod tests {
         let mut e = Editor::new(200, 100);
         e.set_tool(Tool::Highlight);
         drag(&mut e, (90, 40), (10, 30));
-        assert_eq!(e.items(), &[Item::Highlight(Rect::new(10, 30, 80, 10))]);
+        assert_eq!(
+            e.items(),
+            &[Item::Highlight(Rect::new(10, 30, 80, 10), Color::Yellow)]
+        );
         drag(&mut e, (10, 60), (150, 60 + MIN_SIZE - 1)); // a long but too-thin stroke
         assert_eq!(e.items().len(), 1);
     }
@@ -796,7 +1018,10 @@ mod tests {
         assert_eq!(e.items().len(), 2);
         assert!(e.preview().is_none());
         e.undo();
-        assert_eq!(e.items(), &[Item::Highlight(Rect::new(10, 10, 50, 20))]);
+        assert_eq!(
+            e.items(),
+            &[Item::Highlight(Rect::new(10, 10, 50, 20), Color::Yellow)]
+        );
         e.undo();
         assert!(e.items().is_empty());
     }
@@ -806,15 +1031,25 @@ mod tests {
         let mut e = Editor::new(200, 100);
         assert_eq!(e.preview(), None);
         let cases = [
-            (Tool::Rect, Item::Rect(Rect::new(10, 10, 40, 20))),
-            (Tool::Text, Item::Rect(Rect::new(10, 10, 40, 20))),
-            (Tool::Highlight, Item::Highlight(Rect::new(10, 10, 40, 20))),
+            (
+                Tool::Rect,
+                Item::Rect(Rect::new(10, 10, 40, 20), Style::DEFAULT),
+            ),
+            (
+                Tool::Text,
+                Item::Rect(Rect::new(10, 10, 40, 20), Style::DEFAULT),
+            ),
+            (
+                Tool::Highlight,
+                Item::Highlight(Rect::new(10, 10, 40, 20), Color::Yellow),
+            ),
             (Tool::Pixelate, Item::Pixelate(Rect::new(10, 10, 40, 20))),
             (
                 Tool::Arrow,
                 Item::Arrow {
                     from: Point::new(50, 30),
                     to: Point::new(10, 10),
+                    style: Style::DEFAULT,
                 },
             ),
         ];
@@ -872,9 +1107,14 @@ mod tests {
     #[test]
     fn pixel_layer_blends_highlights_translucently() {
         let src = Rgba::from_raw(20, 20, vec![0; 20 * 20 * 4]).unwrap();
-        let out = apply_pixel_layer(&src, &[Item::Highlight(Rect::new(5, 5, 10, 10))]);
+        let out = apply_pixel_layer(
+            &src,
+            &[Item::Highlight(Rect::new(5, 5, 10, 10), Color::Yellow)],
+        );
         let a = u32::from(HIGHLIGHT_ALPHA);
-        let want = HIGHLIGHT_RGB.map(|c| ((u32::from(c) * a + 127) / 255) as u8);
+        let want = Color::Yellow
+            .rgb()
+            .map(|c| ((u32::from(c) * a + 127) / 255) as u8);
         assert_eq!(out.get_pixel(5, 5).0[..3], want);
         assert_eq!(out.get_pixel(14, 14).0[..3], want);
         assert_eq!(out.get_pixel(4, 5).0, [0, 0, 0, 0], "outside untouched");
@@ -885,12 +1125,214 @@ mod tests {
     fn pixel_items_apply_in_order() {
         let src = detailed(24, 24);
         let all = Rect::new(0, 0, 24, 24);
-        let hl_then_px = apply_pixel_layer(&src, &[Item::Highlight(all), Item::Pixelate(all)]);
-        let px_then_hl = apply_pixel_layer(&src, &[Item::Pixelate(all), Item::Highlight(all)]);
+        let hl_then_px = apply_pixel_layer(
+            &src,
+            &[Item::Highlight(all, Color::Yellow), Item::Pixelate(all)],
+        );
+        let px_then_hl = apply_pixel_layer(
+            &src,
+            &[Item::Pixelate(all), Item::Highlight(all, Color::Yellow)],
+        );
         assert_ne!(hl_then_px, px_then_hl);
         // Either way the area is redacted: one 12-px block is one colour.
         for out in [&hl_then_px, &px_then_hl] {
             assert_eq!(out.get_pixel(0, 0), out.get_pixel(11, 11));
         }
+    }
+
+    #[test]
+    fn defaults_keep_the_old_look_red_and_3px() {
+        assert_eq!(Style::DEFAULT.color, Color::Red);
+        assert_eq!(Color::Red.rgb(), [255, 0, 0]);
+        assert_eq!(
+            Style::DEFAULT.thickness.px(),
+            3,
+            "the editor's original line width"
+        );
+        let e = Editor::new(200, 100);
+        assert_eq!(e.tool(), Tool::Rect);
+        assert_eq!(e.style(), Style::DEFAULT);
+        for tool in [Tool::Rect, Tool::Text, Tool::Arrow] {
+            assert_eq!(tool.default_style(), Style::DEFAULT, "{tool:?}");
+        }
+        assert_eq!(Tool::Highlight.default_style().color, Color::Yellow);
+    }
+
+    #[test]
+    fn palette_is_six_distinct_named_colours() {
+        let p = Color::PALETTE;
+        assert_eq!(p.len(), 6);
+        assert_eq!(p[0], Color::Red, "red first: key 1 and the default");
+        for (i, a) in p.iter().enumerate() {
+            for b in &p[i + 1..] {
+                assert_ne!(a.rgb(), b.rgb());
+                assert_ne!(a.name(), b.name());
+            }
+        }
+    }
+
+    #[test]
+    fn thickness_steps_and_saturates() {
+        let px: Vec<i32> = Thickness::ALL.iter().map(|t| t.px()).collect();
+        assert!(px.windows(2).all(|w| w[0] < w[1]), "{px:?}");
+        assert_eq!(Thickness::Thin.thinner(), Thickness::Thin);
+        assert_eq!(Thickness::Thick.thinner(), Thickness::Medium);
+        assert_eq!(Thickness::Medium.thicker(), Thickness::Thick);
+        assert_eq!(Thickness::Thick.thicker(), Thickness::Thick);
+    }
+
+    #[test]
+    fn which_tools_use_colour_and_thickness() {
+        for tool in Tool::ALL {
+            let filled = matches!(tool, Tool::Highlight | Tool::Pixelate);
+            assert_eq!(tool.uses_thickness(), !filled, "{tool:?}");
+            assert_eq!(tool.uses_color(), tool != Tool::Pixelate, "{tool:?}");
+        }
+    }
+
+    #[test]
+    fn style_is_per_tool_and_stamped_on_each_item() {
+        let mut e = Editor::new(200, 100);
+        e.set_color(Color::Blue);
+        e.set_thickness(Thickness::Thick);
+        let blue_thick = Style {
+            color: Color::Blue,
+            thickness: Thickness::Thick,
+        };
+        drag(&mut e, (10, 10), (50, 50));
+
+        e.set_tool(Tool::Arrow);
+        assert_eq!(e.style(), Style::DEFAULT, "the arrow kept its own style");
+        drag(&mut e, (10, 80), (90, 80));
+
+        e.set_tool(Tool::Rect);
+        assert_eq!(
+            e.style(),
+            blue_thick,
+            "the rectangle tool remembers its style"
+        );
+        e.set_color(Color::Green); // later changes don't recolour what is drawn
+        assert_eq!(
+            e.items(),
+            &[
+                Item::Rect(Rect::new(10, 10, 40, 40), blue_thick),
+                Item::Arrow {
+                    from: Point::new(10, 80),
+                    to: Point::new(90, 80),
+                    style: Style::DEFAULT,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn highlight_uses_the_chosen_colour() {
+        let mut e = Editor::new(200, 100);
+        e.set_tool(Tool::Highlight);
+        e.set_color(Color::Green);
+        drag(&mut e, (10, 10), (60, 30));
+        assert_eq!(
+            e.items(),
+            &[Item::Highlight(Rect::new(10, 10, 50, 20), Color::Green)]
+        );
+    }
+
+    #[test]
+    fn colour_and_thickness_apply_to_the_text_box_being_typed() {
+        let mut e = Editor::new(200, 100);
+        e.set_tool(Tool::Text);
+        drag(&mut e, (10, 10), (110, 50));
+        type_str(&mut e, "hi");
+        e.set_color(Color::Black);
+        e.set_thickness(Thickness::Thin);
+        let want = Style {
+            color: Color::Black,
+            thickness: Thickness::Thin,
+        };
+        assert_eq!(e.typing().unwrap().style, want);
+        e.on_enter();
+        assert_eq!(
+            e.items(),
+            &[Item::Text {
+                rect: Rect::new(10, 10, 100, 40),
+                text: "hi".into(),
+                style: want,
+            }]
+        );
+    }
+
+    #[test]
+    fn redo_puts_back_what_undo_took_in_order() {
+        let mut e = Editor::new(200, 100);
+        drag(&mut e, (10, 10), (50, 50));
+        drag(&mut e, (60, 10), (100, 50));
+        let both = e.items().to_vec();
+        assert!(!e.can_redo());
+        assert!(e.undo());
+        assert!(e.undo());
+        assert!(!e.undo(), "nothing left to undo");
+        assert!(e.items().is_empty() && e.can_redo());
+        assert!(e.redo());
+        assert_eq!(e.items(), &both[..1]);
+        assert!(e.redo());
+        assert_eq!(e.items(), &both[..]);
+        assert!(!e.redo(), "nothing left to redo");
+    }
+
+    #[test]
+    fn a_new_item_after_undo_drops_the_redo_list() {
+        let mut e = Editor::new(200, 100);
+        drag(&mut e, (10, 10), (50, 50));
+        e.undo();
+        drag(&mut e, (60, 10), (100, 50));
+        assert!(!e.can_redo());
+        assert!(!e.redo());
+        assert_eq!(e.items().len(), 1);
+
+        // Committing text counts as a new item too.
+        e.undo();
+        e.set_tool(Tool::Text);
+        drag(&mut e, (10, 60), (90, 90));
+        type_str(&mut e, "t");
+        e.on_enter();
+        assert!(!e.redo());
+        assert_eq!(e.items().len(), 1);
+    }
+
+    #[test]
+    fn redo_waits_for_work_in_progress_and_cancelling_keeps_it() {
+        let mut e = Editor::new(200, 100);
+        drag(&mut e, (10, 10), (50, 50));
+        e.undo();
+
+        e.on_down(Point::new(60, 60));
+        e.on_move(Point::new(90, 90));
+        assert!(!e.can_redo() && !e.redo(), "no redo mid-drag");
+        assert!(
+            !e.undo(),
+            "undo cancels the drag, it does not touch history"
+        );
+
+        e.set_tool(Tool::Text);
+        drag(&mut e, (10, 60), (90, 90));
+        assert!(!e.redo(), "no redo while a text box is open");
+        e.on_escape(); // an empty, cancelled box commits nothing
+
+        assert!(e.redo());
+        assert_eq!(
+            e.items(),
+            &[Item::Rect(Rect::new(10, 10, 40, 40), Style::DEFAULT)]
+        );
+    }
+
+    #[test]
+    fn redo_restores_pixel_items_too() {
+        let mut e = Editor::new(200, 100);
+        e.set_tool(Tool::Pixelate);
+        drag(&mut e, (10, 10), (50, 50));
+        e.undo();
+        assert!(e.items().is_empty());
+        e.redo();
+        assert_eq!(e.items(), &[Item::Pixelate(Rect::new(10, 10, 40, 40))]);
     }
 }
