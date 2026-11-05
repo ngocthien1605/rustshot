@@ -67,17 +67,24 @@ from the toolbar or with a letter key:
 - **Pixelate** (`P`) — redacts an area: each 12 × 12-px block becomes its average colour in the
   saved and copied image (the detail is gone from that file, not hidden under an overlay). The
   original screenshot is not changed, so share the `…_annotated` copy.
+- **Black box** (`B`) — redacts an area with solid black; unlike pixelate, not even the shape of
+  large text or a logo is left.
+- **Step** (`N`) — click to place numbered circles 1, 2, 3 … (placed where the button is
+  released). The next number is one more than the highest present; deleting one in the middle
+  does not renumber the rest. The line setting chooses the size (22 / 30 / 44 px).
+- **Select** (`S`) — click a mark (the top one wins; an outline by its edge) to select it; drag to
+  move it inside the picture, `Delete` to remove it, a colour or line button to restyle it, `Esc`
+  to deselect. Each move, delete or restyle is one undo step.
 
 The mouse cursor over the image is a red crosshair. **Colour** (six swatches, keys `1`–`6`: red,
 yellow, green, blue, black, white) and **line** (thin 2 px, medium 3 px, thick 6 px; `[` / `]`)
-apply to the current tool, and each tool remembers its own: red and medium by default, yellow for
-Highlight. Highlight and pixelate change the pixels, so they always sit under outlines, arrows and
-text. The single-key shortcuts act only while no text box is being typed in, and follow the typed
+apply to the current tool (or, with Select, to the selected mark), and each tool remembers its
+own: red and medium by default, yellow for Highlight. Highlight, pixelate and black box change the
+pixels, so they always sit under outlines, arrows, text and step markers. The single-key shortcuts act only while no text box is being typed in, and follow the typed
 character (with an East Asian IME on, switch it to direct input).
 
-Other controls: **Undo** (`Ctrl+Z`) removes the last annotation (or cancels the one you're
-drawing); **Redo** (`Ctrl+Y` or `Ctrl+Shift+Z`) restores what undo removed, until you draw
-something new; **Save** (`Ctrl+S`) writes a copy next to the original as `…_annotated.png` — your
+Other controls: **Undo** (`Ctrl+Z`) takes back the last change (or cancels the shape or move in
+progress); **Redo** (`Ctrl+Y` or `Ctrl+Shift+Z`) restores it, until you make a new change; **Save** (`Ctrl+S`) writes a copy next to the original as `…_annotated.png` — your
 original is never overwritten, and saving again creates `…_annotated_2.png`; **Copy** (`Ctrl+C`)
 puts the annotated image on the clipboard. Closing the editor with unsaved annotations asks
 whether to save first. Annotations are drawn at the screenshot's full resolution, whatever the

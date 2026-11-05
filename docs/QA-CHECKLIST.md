@@ -113,6 +113,36 @@ the exported image).
 - [ ] **Large screenshot** (4K or all monitors): drawing, undoing and redoing pixelate and
       highlight stays responsive (the canvas is rebuilt on each change of those).
 
+## Annotation tools 2 — black box, select/move/delete, step markers (0.1.10)
+
+The model and the GDI render tests (black box, step markers) run on CI; the window behaviour
+below is still to be tried by hand.
+
+- [ ] **Toolbar**: Select, Rectangle, Text, Arrow, Highlight, Pixelate, Black box, Step, the six
+      colours, three lines, Undo, Redo, Save, Copy — all visible, none clipped, at 100 % and at
+      your usual scale (125 % / 150 %). Rectangle is still the tool pressed when the editor opens.
+- [ ] **Black box** (`B`): solid black while dragging and after release; Save → the
+      `_annotated` file is black there (zoom in: no detail at all). Colour and line buttons are
+      greyed while it is the tool.
+- [ ] **Step** (`N`): clicks place 1, 2, 3 …; the marker follows the pointer while the button
+      is down. Colours: white number on red/green/blue/black, black on yellow/white. Thin /
+      medium / thick change the size. Undo the last one, click again → the same number is reused.
+      Numbers 10+ fit inside the circle.
+- [ ] **Select** (`S`): the cursor is an arrow, and a four-way arrow over a mark. Click a
+      rectangle's edge, an arrow, a text box, a highlight, a black box, a step marker → a dotted
+      frame around it. Clicking inside a hollow rectangle selects what is inside it (or nothing).
+      Empty space or `Esc` deselects.
+- [ ] **Move**: drag a selected mark; it stays inside the picture at every edge. Dragging a
+      pixelate area or black box shows the content under it until release, then covers it again
+      at the new place; the saved file is covered at the new place only.
+- [ ] **Delete** removes the selected mark; **Undo** brings it back in the same place. Undo also
+      takes back a move and a colour change one at a time; Redo reapplies them.
+- [ ] **Restyle**: with a mark selected, the toolbar shows its colour and line; clicking another
+      colour / line (or `1`–`6`, `[` `]`) changes that mark only. Greyed for pixelate and black
+      box. Switching back to the Rectangle tool shows the Rectangle tool's own colour.
+- [ ] **Large screenshot** (4K / all monitors): moving a black box or highlight is smooth while
+      dragging (the image is rebuilt once at the start and once at the end).
+
 ## M3 — Recording (MP4, video-only)
 - [ ] Countdown → compact always-on-top toolbar (elapsed + Pause/Stop) → Stop finalises.
 - [ ] 60 s 1080p30 monitor recording plays correctly in VLC and Windows Media Player.
