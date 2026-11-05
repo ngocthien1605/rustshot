@@ -446,3 +446,34 @@ Every non-obvious choice + a one-line rationale. Newest at top within each phase
 - **Toolbar layout is computed** from each button's gap and width (`button_x`, `TOOLBAR_W`), so
   adding a button cannot leave stale x positions; a test checks that no buttons overlap and that
   the toolbar fits the minimum width (now about 1010 px at 96 DPI).
+
+## Crop, Pin to screen, History
+
+- **Crop is part of the document, not a pixel operation.** `model::Doc` = items + crop; undo
+  snapshots and the "unsaved work" check use both, so a crop can be undone, redone, replaced or
+  removed like a mark, and coordinates stay in the full image (annotations are never shifted).
+  Save and Copy render at full size and cut last (`win::export`), so redactions and outlines at
+  the edge are cut exactly where the crop says. Both corner pixels are kept (inclusive), so a
+  corner-to-corner drag keeps the whole image. A click with the Crop tool removes the crop: the
+  cheapest way to undo-without-history, and undo still brings it back.
+- **A pin shows device pixels 1:1** at 100 %: a screenshot's pixels are device pixels, so a pinned
+  region covers exactly what it captured. It ignores `WM_DPICHANGED` for the same reason. It opens
+  at the largest zoom step that fits 80 % of the work area. The window is a top-most tool window
+  (no taskbar button) whose whole client area is a caption (`HTCAPTION`), so dragging is native.
+  It holds its own DIB of the image (not the `Rgba` too), so several pins of 4K captures stay
+  affordable, and deleting the file never breaks one. The right-click menu runs `TrackPopupMenu`
+  with `TPM_RETURNCMD` and no state reference held across it, like the editor's message boxes.
+- **History lives in `config`** (pure, TOML, atomic write shared with `Settings`), so it is tested
+  on any platform, and in its own file (`history.toml`) rather than `config.toml`, which users
+  edit by hand. Entries store a preformatted local time instead of a timestamp, so the app needs
+  no new time dependency to show it. Recording is best effort (logged, never a dialog): the
+  capture already succeeded. Missing files are dropped when the window opens, and the file is
+  rewritten only if something was dropped. Path matching is exact (the app always records the
+  same spelling it saved). `history.max_entries` is bounded 10–1000; `enabled = false` stops
+  recording without deleting the existing list.
+- **History window = plain LISTBOX + painted preview**, not a ListView: one column of text is
+  enough, and it needs no common-controls initialisation. Buttons act on a path copied out of the
+  state first, because the editor, a pin, Explorer and the confirmation boxes can all pump
+  messages back into the window procedure. "Delete file…" is permanent (no Recycle Bin, which
+  would need `IFileOperation`) and says so in its question.
+

@@ -17,8 +17,9 @@ RustShot là một ứng dụng Windows nhỏ, nằm ở khay hệ thống (các
 không có cửa sổ chính. Nó làm hai việc:
 
 - **Chụp màn hình**: một vùng tự kéo, một cửa sổ, một màn hình, hoặc tất cả màn hình cùng lúc —
-  rồi ghi chú bằng khung, chữ, mũi tên, số thứ tự, bút dạ quang, hoặc che (pixelate, tô đen)
-  những gì người khác không được thấy.
+  rồi ghi chú bằng khung, chữ, mũi tên, số thứ tự, bút dạ quang, cắt ảnh, che (pixelate, tô
+  đen) những gì người khác không được thấy, hoặc ghim ảnh nổi trên màn hình. **History…** giúp
+  tìm lại ảnh đã chụp.
 - **Quay màn hình**: quay một vùng hoặc một cửa sổ thành video **MP4** (có thể kèm tiếng micro
   và tiếng của máy tính), hoặc thành ảnh động **GIF**.
 
@@ -68,6 +69,7 @@ Bấm vào biểu tượng ở khay (chuột trái hoặc phải):
 | **Screenshot ▸ Screenshot — All monitors** | Chụp tất cả màn hình thành một ảnh. |
 | **Record ▸ Record video (region/window)** | Quay một vùng hoặc cửa sổ thành MP4. |
 | **Record ▸ Record GIF (region/window)** | Quay một vùng hoặc cửa sổ thành GIF. |
+| **History…** | Xem danh sách ảnh chụp và video gần đây ([mục 5](#tìm-lại-ảnh-đã-chụp-history)). |
 | **Open output folder** | Mở thư mục lưu ảnh và video. |
 | **Settings…** | Mở cửa sổ cài đặt ([mục 9](#9-cài-đặt-settings)). |
 | **Quit RustShot** | Thoát. Nếu đang quay, video được dừng và lưu trước khi thoát. |
@@ -105,6 +107,7 @@ mọi màn hình.
 | Nút | Tác dụng |
 |---|---|
 | **Annotate** | Mở ảnh trong trình ghi chú ([mục 6](#6-ghi-chú-lên-ảnh-annotate)). |
+| **Pin** | Ghim ảnh nổi trên mọi cửa sổ, thành một cửa sổ nhỏ ([bên dưới](#ghim-ảnh-lên-màn-hình-pin)). |
 | **Open** | Mở ảnh bằng trình xem ảnh mặc định. |
 | **Folder** | Mở File Explorer, chọn sẵn file ảnh. |
 | **Copy** | Chép ảnh vào clipboard lần nữa. |
@@ -114,6 +117,38 @@ mọi màn hình.
 **Chụp hẹn giờ.** Để chụp một menu hay chú thích sẽ biến mất khi bạn nhấn phím, đặt
 `delay_seconds` trong `config.toml` (0–60, xem [mục 11](#11-nâng-cao-sửa-configtoml)). RustShot sẽ
 chờ chừng ấy giây rồi mới chụp; trong lúc chờ không có gì hiện trên màn hình.
+
+### Ghim ảnh lên màn hình (Pin)
+
+Bấm **Pin** ở ô xem trước (hoặc trong cửa sổ History) để hiện ảnh chụp trong một cửa sổ nhỏ luôn
+nằm trên mọi cửa sổ khác — tiện khi chép số liệu từ màn hình này sang một form khác, hoặc để giữ
+hướng dẫn trước mắt.
+
+- Ảnh mở đúng kích thước lúc chụp (100 %), hoặc nhỏ hơn nếu không vừa màn hình.
+- **Kéo** để di chuyển đi bất cứ đâu. **Lăn chuột**: phóng to, thu nhỏ (10 %–400 %) quanh con trỏ.
+- **Bấm chuột phải**: **Copy**, **Actual size (100 %)**, **Close**. `Ctrl+C` cũng chép ảnh.
+- **Bấm đúp** hoặc `Esc` để đóng. Có thể ghim nhiều ảnh cùng lúc.
+
+Ảnh ghim là một bản sao: xoá file không làm đóng nó, và đóng nó không làm thay đổi file.
+
+### Tìm lại ảnh đã chụp (History)
+
+Khay hệ thống → **History…** liệt kê những gì RustShot đã lưu — ảnh chụp, bản đã ghi chú và
+video, mới nhất ở trên, kèm thời gian và tên file. Bấm vào một dòng để xem trước, đường dẫn đầy đủ
+và kích thước, rồi:
+
+| Nút | Tác dụng |
+|---|---|
+| **Open** (hoặc bấm đúp) | Mở bằng ứng dụng mặc định (xem ảnh, phát video). |
+| **Annotate** / **Pin** / **Copy** | Như ở ô xem trước (chỉ với ảnh). |
+| **Folder** | Mở Explorer và chọn sẵn file. |
+| **Remove** | Bỏ khỏi danh sách. File vẫn giữ nguyên. |
+| **Delete file…** | Xoá file khỏi ổ đĩa, sau khi hỏi lại. File **không** vào Thùng rác. |
+| **Clear list…** | Xoá trắng danh sách, sau khi hỏi lại. Các file vẫn giữ nguyên. |
+
+File bạn đã di chuyển hoặc xoá bên ngoài RustShot sẽ tự biến khỏi danh sách lần mở sau. Danh sách
+giữ 100 mục mới nhất; muốn đổi con số đó, hoặc tắt lịch sử, xem
+[mục 11](#11-nâng-cao-sửa-configtoml).
 
 ## 6. Ghi chú lên ảnh (Annotate)
 
@@ -135,6 +170,9 @@ chờ chừng ấy giây rồi mới chụp; trong lúc chờ không có gì hi�
      "làm bước này, rồi bước kia". Vòng tròn hiện ở chỗ bạn thả chuột, nên có thể kéo để chỉnh
      vị trí. Màu tô kín vòng tròn (số màu trắng, hoặc đen trên nền vàng và trắng); tuỳ chọn nét
      quyết định cỡ vòng tròn.
+   - **Crop** (`C`): kéo qua phần ảnh muốn giữ. Phần còn lại bị tô tối và bị cắt bỏ khi
+     **Save** hoặc **Copy**. Kéo lại để đổi; bấm một lần (không kéo) bằng Crop để bỏ cắt. Undo
+     dùng được cho cả việc cắt ảnh. Ảnh chụp gốc không bị thay đổi.
 3. **Sửa những gì đã vẽ: Select** (`S`). Bấm vào một nét để chọn — một khung chấm chấm hiện quanh
    nó. Sau đó:
    - **kéo** để di chuyển (nét luôn nằm trong ảnh);
@@ -285,7 +323,7 @@ chọn phím tắt khác trong RustShot. Chú thích ở khay cho biết có bao
 
 | Thao tác | Phím |
 |---|---|
-| Công cụ Select / Rectangle / Text / Arrow | `S` / `R` / `T` / `A` |
+| Công cụ Select / Crop / Rectangle / Text / Arrow | `S` / `C` / `R` / `T` / `A` |
 | Công cụ Highlight / Pixelate / Black box / Step | `H` / `P` / `B` / `N` |
 | Xoá nét đang chọn | `Delete` |
 | Màu đỏ, vàng, xanh lá, xanh dương, đen, trắng | `1` … `6` |
@@ -310,6 +348,8 @@ Một số tuỳ chọn chỉ có trong `%APPDATA%\RustShot\config.toml`:
 | `recording.gif_max_width` | `800` | Cạnh dài của GIF, tính bằng pixel (16–7680). |
 | `recording.gif_fps` | `15` | Số khung hình mỗi giây của GIF (1–50). |
 | `recording.gif_max_seconds` | `30` | Độ dài tối đa của GIF (1–600 giây). |
+| `history.enabled` | `true` | Lưu danh sách ảnh chụp hiện trong **History…**. |
+| `history.max_entries` | `100` | Số mục danh sách giữ lại (10–1000). |
 
 Cách sửa an toàn:
 
@@ -328,6 +368,7 @@ bạn. Danh sách đầy đủ các khoá nằm trong [User Guide](USER-GUIDE.md
 |---|---|
 | Ảnh chụp và video | `Pictures\RustShot` (hoặc thư mục chọn trong Settings) |
 | Cài đặt | `%APPDATA%\RustShot\config.toml` |
+| Lịch sử ảnh chụp | `%APPDATA%\RustShot\history.toml` |
 | Log (giữ 14 ngày gần nhất) | `%APPDATA%\RustShot\logs\rustshot.log.YYYY-MM-DD` (ngày theo giờ UTC) |
 | Chi tiết lỗi nghiêm trọng, nếu có | `%APPDATA%\RustShot\logs\panic.log` |
 | Mục tự chạy khi đăng nhập | Registry `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`, giá trị `RustShot` |

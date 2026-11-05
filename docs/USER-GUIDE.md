@@ -13,8 +13,8 @@ RustShot 0.1.10.
 
 Run `rustshot.exe`. A tray icon (a teal rounded square) appears near the clock — RustShot has no
 main window; everything is driven from the tray menu and global hotkeys. Right-click (or
-left-click) the tray icon for the menu: the **Screenshot** and **Record** submenus, **Open output
-folder**, **Settings…**, and **Quit RustShot** to exit (a recording in progress is stopped and
+left-click) the tray icon for the menu: the **Screenshot** and **Record** submenus, **History…**,
+**Open output folder**, **Settings…**, and **Quit RustShot** to exit (a recording in progress is stopped and
 saved first).
 
 On first run, RustShot writes its configuration to `%APPDATA%\RustShot\config.toml` and creates
@@ -41,6 +41,7 @@ Each screenshot is saved to the output folder with an automatic name
 **flyout** in the bottom-right corner with buttons:
 
 - **Annotate** — open the screenshot in RustShot's own editor (see below); the flyout closes.
+- **Pin** — show it in a borderless, always-on-top window (see below); the flyout closes.
 - **Open** — open the image in the default viewer.
 - **Folder** — open Explorer with the file selected.
 - **Copy** — copy the image to the clipboard again.
@@ -52,6 +53,24 @@ is over it.
 
 With `delay_seconds` set in `config.toml`, a screenshot waits that long before capturing; nothing
 is shown during the wait.
+
+### Pinned screenshots
+
+**Pin** (flyout or History) shows the screenshot in a borderless, always-on-top window with a
+thin teal frame, at 100 % (its captured size) unless that exceeds 80 % of the screen, then at the
+largest zoom step that fits. Drag anywhere to move it; the mouse wheel zooms 10 %–400 % around
+the pointer; right-click for **Copy**, **Actual size (100 %)** and **Close**; `Ctrl+C` copies;
+double-click or `Esc` closes. Each pin holds its own copy of the image; several can be open.
+
+### History
+
+Tray → **History…** lists saved screenshots, annotated copies and recordings (also those that
+ended early), newest first, from `%APPDATA%\RustShot\history.toml`. Selecting one shows a
+preview, its path and its size. Buttons: **Open** (also double-click), **Annotate**, **Pin**,
+**Copy** (pictures only), **Folder**, **Remove** (from the list only), **Delete file…** (asks;
+permanent, not the Recycle Bin) and **Clear list…** (asks; files are kept). Entries whose file
+is gone are dropped when the window opens. `history.enabled` and `history.max_entries` in
+`config.toml` turn it off or change its length.
 
 ### Annotating a screenshot
 
@@ -75,6 +94,8 @@ from the toolbar or with a letter key:
 - **Select** (`S`) — click a mark (the top one wins; an outline by its edge) to select it; drag to
   move it inside the picture, `Delete` to remove it, a colour or line button to restyle it, `Esc`
   to deselect. Each move, delete or restyle is one undo step.
+- **Crop** (`C`) — drag the part to keep (both corner pixels included); the rest is shaded and is
+  cut off by Save and Copy. Drag again to replace it; a click removes it. Undoable.
 
 The mouse cursor over the image is a red crosshair. **Colour** (six swatches, keys `1`–`6`: red,
 yellow, green, blue, black, white) and **line** (thin 2 px, medium 3 px, thick 6 px; `[` / `]`)
@@ -188,6 +209,10 @@ microphone_device = ""       # empty = system default; else the microphone's nam
 gif_max_width = 800          # longer edge, 16..=7680; frames are scaled to fit
 gif_max_seconds = 30         # 1..=600; the recording stops, with a notice, at the limit
 gif_fps = 15
+
+[history]
+enabled = true               # keep the list shown by History…
+max_entries = 100            # 10..=1000
 
 [hotkeys]
 region_screenshot = "PrintScreen"

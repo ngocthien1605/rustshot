@@ -18,6 +18,9 @@ Status legend: ✅ done & verified · 🟡 in progress · ⬜ not started · �
   history list.
 - **Docs:** step-by-step Manual Guide in English and Vietnamese (`MANUAL-GUIDE.md`,
   `MANUAL-GUIDE.vi.md`) next to the reference `USER-GUIDE.md`; all three ship in the zip.
+- **In review:** Crop (editor), Pin to screen, Capture history — PR ngocthien1605/rustshot#5.
+  Pure logic tested (editor model incl. crop, pin geometry, `config::history`); the windows are
+  still to be tried by hand (QA-CHECKLIST, "Crop, Pin to screen, History").
 
 The milestone sections below record each phase as it was finished; later changes are in the
 verification log at the end (newest first).
@@ -213,6 +216,16 @@ verification log at the end (newest first).
 ---
 
 ### Verification log
+- 2026-11-05: **Crop, Pin to screen, Capture history** (branch, three feature commits and docs).
+  Crop: `model::Doc` (items + crop) in undo snapshots and the unsaved check, `win::export` cuts
+  after rendering; 81 editor-model tests (was 75). Pin: `ui/pin` (pure geometry, 5 tests; Win32
+  top-most caption window), flyout Pin button, image/DIB helpers moved to `platform::gdi` (round
+  trip tested). History: `config::history` (6 tests incl. TOML round trip and atomic save; 36
+  config tests), `[history]` settings, recorded on screenshot / annotated save / recording end,
+  History window with list, preview and eight buttons, tray item. Linux VM: fmt, clippy
+  `-D warnings` for `x86_64-pc-windows-msvc` (all targets) and the Linux crates; `cargo test -p
+  config -p imaging -p capture-core`; the model/pin tests through the scratch crate. The
+  render/export and window-layout tests run on Windows CI only. Not done: using the windows.
 - 2026-11-05: **Release 0.1.10** (tag `v0.1.10`): black box redaction, Select (move, restyle,
   delete) and numbered step markers. CI on the PR (windows-latest) ran 256 tests including the
   black box and step-marker render tests, cargo-deny and the portable zip build. The owner tried
