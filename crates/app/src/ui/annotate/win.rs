@@ -46,7 +46,9 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WM_SIZE, WM_SYSKEYDOWN, WNDCLASSW, WS_CHILD, WS_OVERLAPPEDWINDOW, WS_VISIBLE,
 };
 
-use windows::Win32::Graphics::Gdi::ScreenToClient;
+use windows::Win32::Graphics::Gdi::{
+    Ellipse, ScreenToClient, DT_CENTER, DT_SINGLELINE, DT_VCENTER,
+};
 use windows::Win32::UI::Input::KeyboardAndMouse::VK_DELETE;
 use windows::Win32::UI::WindowsAndMessaging::{
     GetCursorPos, SetCursor, HTCLIENT, IDC_ARROW, IDC_SIZEALL, WM_SETCURSOR,
@@ -71,7 +73,7 @@ const HIT_SLOP: i32 = 5;
 /// each button's x is the running sum ([`button_x`]). The tool buttons are radio buttons (their
 /// ids must stay consecutive, in [`Tool::ALL`] order); the swatches and thickness buttons are
 /// owner-drawn (`WM_DRAWITEM`), their labels only name them for screen readers.
-const BUTTONS: [(i32, PCWSTR, i32, i32, u32); 20] = [
+const BUTTONS: [(i32, PCWSTR, i32, i32, u32); 21] = [
     (ID_TOOL0, w!("Select"), 8, 50, TOOL | WS_GROUP),
     (ID_TOOL0 + 1, w!("Rectangle"), 4, 72, TOOL),
     (ID_TOOL0 + 2, w!("Text"), 4, 44, TOOL),
@@ -79,6 +81,7 @@ const BUTTONS: [(i32, PCWSTR, i32, i32, u32); 20] = [
     (ID_TOOL0 + 4, w!("Highlight"), 4, 64, TOOL),
     (ID_TOOL0 + 5, w!("Pixelate"), 4, 60, TOOL),
     (ID_TOOL0 + 6, w!("Black box"), 4, 66, TOOL),
+    (ID_TOOL0 + 7, w!("Step"), 4, 44, TOOL),
     (ID_COLOR0, w!("Red"), 12, 26, BS_OWNERDRAW),
     (ID_COLOR0 + 1, w!("Yellow"), 2, 26, BS_OWNERDRAW),
     (ID_COLOR0 + 2, w!("Green"), 2, 26, BS_OWNERDRAW),
@@ -935,6 +938,7 @@ fn paint_item(hdc: HDC, item: &Item, view: View) {
             draw_text(hdc, *rect, text, style.color, view);
         }
         Item::Arrow { from, to, style } => draw_arrow(hdc, *from, *to, *style, view),
+        Item::Step { at, number, style } => draw_step(hdc, *at, *number, *style, view),
         Item::Highlight(..) | Item::Pixelate(_) | Item::BlackBox(_) => {}
     }
 }
@@ -991,6 +995,69 @@ fn alpha_fill(hdc: HDC, r: Rect, color: Color, view: View) {
     // SAFETY: blends our 1×1 DIB onto the DC we are given.
     unsafe {
         let _ = AlphaBlend(hdc, vr.left, vr.top, w, h, dot.dc, 0, 0, 1, 1, blend);
+    }
+}
+
+/// A step marker: a circle filled with the item's colour, ringed and numbered in the colour that
+/// reads on it ([`Color::contrast`]).
+fn draw_step(hdc: HDC, at: Point, number: u32, style: Style, view: View) {
+    let d = view.px(style.thickness.step_diameter()).max(8);
+    let (cx, cy) = (view.ox + view.px(at.x), view.oy + view.px(at.y));
+    let mut circle = RECT {
+        left: cx - d / 2,
+        top: cy - d / 2,
+        right: cx - d / 2 + d,
+        bottom: cy - d / 2 + d,
+    };
+    let ink = colorref(style.color.contrast());
+    let digits = number.to_string();
+    let mut wide: Vec<u16> = digits.encode_utf16().collect();
+    // Smaller type for more digits, so "12" still fits inside the circle.
+    let text_h = match digits.len() {
+        1 => d * 11 / 20,
+        2 => d * 9 / 20,
+        _ => d * 7 / 20,
+    };
+    // SAFETY: GDI drawing on the DC we are given; every object created is deselected and
+    // deleted before returning.
+    unsafe {
+        let brush = CreateSolidBrush(colorref(style.color));
+        let pen = CreatePen(PS_INSIDEFRAME, (d / 15).max(2), ink);
+        let old_brush = SelectObject(hdc, HGDIOBJ(brush.0));
+        let old_pen = SelectObject(hdc, HGDIOBJ(pen.0));
+        let _ = Ellipse(hdc, circle.left, circle.top, circle.right, circle.bottom);
+        SelectObject(hdc, old_pen);
+        SelectObject(hdc, old_brush);
+        let _ = DeleteObject(HGDIOBJ(pen.0));
+        let _ = DeleteObject(HGDIOBJ(brush.0));
+
+        let font = CreateFontW(
+            -text_h.max(6),
+            0,
+            0,
+            0,
+            700,
+            0,
+            0,
+            0,
+            DEFAULT_CHARSET,
+            OUT_DEFAULT_PRECIS,
+            CLIP_DEFAULT_PRECIS,
+            CLEARTYPE_QUALITY,
+            0,
+            w!("Segoe UI"),
+        );
+        let old_font = SelectObject(hdc, HGDIOBJ(font.0));
+        SetBkMode(hdc, TRANSPARENT);
+        SetTextColor(hdc, ink);
+        DrawTextW(
+            hdc,
+            &mut wide,
+            &mut circle,
+            DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
+        );
+        SelectObject(hdc, old_font);
+        let _ = DeleteObject(HGDIOBJ(font.0));
     }
 }
 
@@ -1565,6 +1632,77 @@ mod tests {
         assert_eq!(px(&out, 30, 15), [255, 0, 0, 255], "outline stays on top");
         assert_eq!(px(&out, 45, 35), [255, 255, 255, 255], "outside untouched");
         assert_eq!(px(&out, 9, 15), [255, 255, 255, 255], "left of the box");
+    }
+
+    fn grey(w: u32, h: u32) -> Rgba {
+        Rgba::from_raw(w, h, [128, 128, 128, 255].repeat((w * h) as usize)).unwrap()
+    }
+
+    /// Pixels within `r` of `(cx, cy)` for which `pick` holds.
+    fn count_near(img: &Rgba, cx: u32, cy: u32, r: u32, pick: impl Fn([u8; 4]) -> bool) -> usize {
+        let mut n = 0;
+        for y in cy - r..=cy + r {
+            for x in cx - r..=cx + r {
+                if pick(px(img, x, y)) {
+                    n += 1;
+                }
+            }
+        }
+        n
+    }
+
+    #[test]
+    fn step_marker_is_a_filled_ringed_circle_with_its_number() {
+        let marker = Item::Step {
+            at: Point::new(40, 40),
+            number: 1,
+            style: Style::DEFAULT, // red, medium: 30 px across, 2-px ring
+        };
+        let out = render(&grey(80, 80), &[marker]).unwrap();
+        assert_eq!(
+            px(&out, 50, 40),
+            [255, 0, 0, 255],
+            "red fill beside the digit"
+        );
+        assert_eq!(
+            px(&out, 54, 40),
+            [255, 255, 255, 255],
+            "white ring at the edge"
+        );
+        assert_eq!(px(&out, 60, 40), [128, 128, 128, 255], "outside the circle");
+        assert_eq!(
+            px(&out, 28, 28),
+            [128, 128, 128, 255],
+            "corner of its box, outside"
+        );
+        let white = count_near(&out, 40, 40, 6, |p| p[0] > 200 && p[1] > 200 && p[2] > 200);
+        assert!(white > 8, "white digit pixels in the middle: {white}");
+    }
+
+    #[test]
+    fn step_marker_on_yellow_is_numbered_in_black_and_larger_when_thick() {
+        let marker = Item::Step {
+            at: Point::new(40, 40),
+            number: 12,
+            style: Style {
+                color: Color::Yellow,
+                thickness: super::super::model::Thickness::Thick, // 44 px across
+            },
+        };
+        let out = render(&grey(80, 80), &[marker]).unwrap();
+        let [r, g, b] = Color::Yellow.rgb();
+        assert_eq!(
+            px(&out, 40, 22),
+            [r, g, b, 255],
+            "yellow fill above the digits"
+        );
+        assert_ne!(
+            px(&out, 40, 19),
+            [128, 128, 128, 255],
+            "the ring reaches 21 px out"
+        );
+        let dark = count_near(&out, 40, 40, 8, |p| p[0] < 80 && p[1] < 80 && p[2] < 80);
+        assert!(dark > 8, "black digit pixels in the middle: {dark}");
     }
 
     #[test]

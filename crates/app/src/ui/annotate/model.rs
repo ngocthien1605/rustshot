@@ -57,6 +57,15 @@ impl Color {
             Color::White => [255, 255, 255],
         }
     }
+
+    /// The colour that reads on top of this one: white on the dark colours, black on yellow and
+    /// white. Used for the number and ring of a step marker.
+    pub fn contrast(self) -> Color {
+        match self {
+            Color::Yellow | Color::White => Color::Black,
+            Color::Red | Color::Green | Color::Blue | Color::Black => Color::White,
+        }
+    }
 }
 
 /// Line thickness of outlines, arrows and text-box borders.
@@ -90,6 +99,15 @@ impl Thickness {
         match self {
             Thickness::Thin => Thickness::Medium,
             Thickness::Medium | Thickness::Thick => Thickness::Thick,
+        }
+    }
+
+    /// Diameter (image px) of a step marker drawn with this thickness.
+    pub fn step_diameter(self) -> i32 {
+        match self {
+            Thickness::Thin => 22,
+            Thickness::Medium => 30,
+            Thickness::Thick => 44,
         }
     }
 }
@@ -126,10 +144,12 @@ pub enum Tool {
     /// Drag a rectangle that is filled solid black in the saved/copied image: the strongest
     /// redaction, for what pixelation could leave recognisable.
     BlackBox,
+    /// Click to place the next numbered step marker (①, ②, …).
+    Step,
 }
 
 impl Tool {
-    pub const ALL: [Tool; 7] = [
+    pub const ALL: [Tool; 8] = [
         Tool::Select,
         Tool::Rect,
         Tool::Text,
@@ -137,6 +157,7 @@ impl Tool {
         Tool::Highlight,
         Tool::Pixelate,
         Tool::BlackBox,
+        Tool::Step,
     ];
 
     fn index(self) -> usize {
@@ -148,6 +169,7 @@ impl Tool {
             Tool::Highlight => 4,
             Tool::Pixelate => 5,
             Tool::BlackBox => 6,
+            Tool::Step => 7,
         }
     }
 
@@ -168,9 +190,10 @@ impl Tool {
         !matches!(self, Tool::Select | Tool::Pixelate | Tool::BlackBox)
     }
 
-    /// Whether the thickness applies (highlight, pixelate and black box are filled areas).
+    /// Whether the thickness applies (highlight, pixelate and black box are filled areas; for a
+    /// step marker it sets the size).
     pub fn uses_thickness(self) -> bool {
-        matches!(self, Tool::Rect | Tool::Text | Tool::Arrow)
+        matches!(self, Tool::Rect | Tool::Text | Tool::Arrow | Tool::Step)
     }
 }
 
@@ -196,6 +219,13 @@ pub enum Item {
     Pixelate(Rect),
     /// A redacted area filled solid black by [`apply_pixel_layer`].
     BlackBox(Rect),
+    /// A numbered circle centred on `at`, filled with the style's colour; the thickness sets
+    /// its size ([`Thickness::step_diameter`]).
+    Step {
+        at: Point,
+        number: u32,
+        style: Style,
+    },
 }
 
 impl Item {
@@ -211,9 +241,10 @@ impl Item {
     /// (its line is unused); pixelate and black box have none.
     pub fn style(&self) -> Option<Style> {
         match self {
-            Item::Rect(_, style) | Item::Text { style, .. } | Item::Arrow { style, .. } => {
-                Some(*style)
-            }
+            Item::Rect(_, style)
+            | Item::Text { style, .. }
+            | Item::Arrow { style, .. }
+            | Item::Step { style, .. } => Some(*style),
             Item::Highlight(_, color) => Some(Style {
                 color: *color,
                 ..Style::DEFAULT
@@ -229,7 +260,7 @@ impl Item {
     pub fn uses_thickness(&self) -> bool {
         matches!(
             self,
-            Item::Rect(..) | Item::Text { .. } | Item::Arrow { .. }
+            Item::Rect(..) | Item::Text { .. } | Item::Arrow { .. } | Item::Step { .. }
         )
     }
 
@@ -237,9 +268,10 @@ impl Item {
     fn recolored(&self, color: Color) -> Item {
         let mut item = self.clone();
         match &mut item {
-            Item::Rect(_, style) | Item::Text { style, .. } | Item::Arrow { style, .. } => {
-                style.color = color
-            }
+            Item::Rect(_, style)
+            | Item::Text { style, .. }
+            | Item::Arrow { style, .. }
+            | Item::Step { style, .. } => style.color = color,
             Item::Highlight(_, c) => *c = color,
             Item::Pixelate(_) | Item::BlackBox(_) => {}
         }
@@ -249,17 +281,31 @@ impl Item {
     /// The item with its line thickness replaced (unchanged when it has none).
     fn rethickened(&self, thickness: Thickness) -> Item {
         let mut item = self.clone();
-        if let Item::Rect(_, style) | Item::Text { style, .. } | Item::Arrow { style, .. } =
-            &mut item
+        if let Item::Rect(_, style)
+        | Item::Text { style, .. }
+        | Item::Arrow { style, .. }
+        | Item::Step { style, .. } = &mut item
         {
             style.thickness = thickness;
         }
         item
     }
 
-    /// The box that must stay inside the image when the item is moved: its rectangle, or for an
-    /// arrow the box spanned by its two ends.
+    /// The area the item covers (the selection frame goes around it): its rectangle, the box
+    /// spanned by an arrow's ends, a step marker's circle.
     pub fn bounds(&self) -> Rect {
+        match self {
+            Item::Step { at, style, .. } => {
+                let d = style.thickness.step_diameter();
+                Rect::new(at.x - d / 2, at.y - d / 2, d, d)
+            }
+            _ => self.anchor(),
+        }
+    }
+
+    /// What must stay inside the image when the item is moved: as [`Item::bounds`], except that
+    /// a step marker only keeps its centre inside (like when it is placed).
+    fn anchor(&self) -> Rect {
         match self {
             Item::Rect(r, _)
             | Item::Text { rect: r, .. }
@@ -267,6 +313,7 @@ impl Item {
             | Item::Pixelate(r)
             | Item::BlackBox(r) => *r,
             Item::Arrow { from, to, .. } => Rect::from_points(*from, *to),
+            Item::Step { at, .. } => Rect::new(at.x, at.y, 0, 0),
         }
     }
 
@@ -289,6 +336,11 @@ impl Item {
             Item::Highlight(r, color) => Item::Highlight(mv(r), *color),
             Item::Pixelate(r) => Item::Pixelate(mv(r)),
             Item::BlackBox(r) => Item::BlackBox(mv(r)),
+            Item::Step { at, number, style } => Item::Step {
+                at: mp(at),
+                number: *number,
+                style: *style,
+            },
         }
     }
 
@@ -313,6 +365,9 @@ impl Item {
                 let head = dist(g.tip, g.shaft_end);
                 dist_to_segment(p, *from, *to) <= f64::from(slop + width / 2 + 1)
                     || dist(p, g.tip) <= head + f64::from(slop)
+            }
+            Item::Step { at, style, .. } => {
+                dist(p, *at) <= f64::from(style.thickness.step_diameter() / 2 + slop)
             }
         }
     }
@@ -343,7 +398,7 @@ pub enum Shortcut {
     Thicker,
 }
 
-/// The shortcut for a typed character: `S` `R` `T` `A` `H` `P` `B` pick a tool, `1`–`6` a colour,
+/// The shortcut for a typed character: `S` `R` `T` `A` `H` `P` `B` `N` pick a tool, `1`–`6` a colour,
 /// `[` / `]` step the thickness. Case-insensitive. Characters (not key codes) are matched, so
 /// the keys work the same on any keyboard layout.
 pub fn shortcut(c: char) -> Option<Shortcut> {
@@ -355,6 +410,7 @@ pub fn shortcut(c: char) -> Option<Shortcut> {
         'h' => Shortcut::Tool(Tool::Highlight),
         'p' => Shortcut::Tool(Tool::Pixelate),
         'b' => Shortcut::Tool(Tool::BlackBox),
+        'n' => Shortcut::Tool(Tool::Step),
         '[' => Shortcut::Thinner,
         ']' => Shortcut::Thicker,
         d @ '1'..='6' => {
@@ -573,7 +629,26 @@ impl Editor {
             Tool::Highlight => Item::Highlight(r, style.color),
             Tool::Pixelate => Item::Pixelate(r),
             Tool::BlackBox => Item::BlackBox(r),
+            Tool::Step => Item::Step {
+                at: b,
+                number: self.next_step_number(),
+                style,
+            },
         })
+    }
+
+    /// The number the next step marker gets: one more than the highest on the page, so undoing
+    /// or deleting the last marker frees its number again. Numbers are not shifted when a marker
+    /// in the middle is deleted.
+    pub fn next_step_number(&self) -> u32 {
+        self.items
+            .iter()
+            .filter_map(|item| match item {
+                Item::Step { number, .. } => Some(*number),
+                _ => None,
+            })
+            .max()
+            .map_or(1, |n| n.saturating_add(1))
     }
 
     /// Switch tool. Any text being typed is committed first (or dropped if empty); a move in
@@ -620,10 +695,10 @@ impl Editor {
         }
     }
 
-    /// `item` moved by up to `(dx, dy)`, stopping where its [`Item::bounds`] would leave the
-    /// image.
+    /// `item` moved by up to `(dx, dy)`, stopping where its anchor (its bounds; a step
+    /// marker's centre) would leave the image.
     fn moved(&self, item: &Item, dx: i32, dy: i32) -> Item {
-        let b = item.bounds();
+        let b = item.anchor();
         let (max_x, max_y) = ((self.width - 1).max(0), (self.height - 1).max(0));
         let fit = |d: i32, lo: i32, hi: i32| d.max(lo).min(hi.max(lo));
         let dx = fit(dx, -b.left(), max_x - b.right());
@@ -673,6 +748,16 @@ impl Editor {
             return;
         };
         let style = self.styles[self.tool.index()];
+        if self.tool == Tool::Step {
+            // Placed where the button is released, whatever the drag in between.
+            let number = self.next_step_number();
+            self.push(Item::Step {
+                at: b,
+                number,
+                style,
+            });
+            return;
+        }
         if self.tool == Tool::Arrow {
             if arrow_long_enough(a, b) {
                 self.push(Item::Arrow {
@@ -692,7 +777,7 @@ impl Editor {
             Tool::Highlight => self.push(Item::Highlight(r, style.color)),
             Tool::Pixelate => self.push(Item::Pixelate(r)),
             Tool::BlackBox => self.push(Item::BlackBox(r)),
-            Tool::Arrow | Tool::Select => {} // handled above
+            Tool::Arrow | Tool::Select | Tool::Step => {} // handled above
             Tool::Text => {
                 self.typing = Some(Typing {
                     rect: r,
@@ -866,7 +951,7 @@ pub fn apply_pixel_layer(img: &Rgba, items: &[Item]) -> Rgba {
             Item::Highlight(r, color) => {
                 imaging::blend_rect_in_place(&mut out, *r, color.rgb(), HIGHLIGHT_ALPHA)
             }
-            Item::Rect(..) | Item::Text { .. } | Item::Arrow { .. } => {}
+            Item::Rect(..) | Item::Text { .. } | Item::Arrow { .. } | Item::Step { .. } => {}
         }
     }
     out
@@ -2143,5 +2228,134 @@ mod tests {
             dist_to_segment(Point::new(3, 4), Point::new(0, 0), Point::new(0, 0)),
             5.0
         );
+    }
+
+    fn step(x: i32, y: i32, number: u32) -> Item {
+        Item::Step {
+            at: Point::new(x, y),
+            number,
+            style: Style::DEFAULT,
+        }
+    }
+
+    #[test]
+    fn step_markers_count_up_from_one_at_each_click() {
+        let mut e = Editor::new(200, 100);
+        assert!(e.apply_shortcut(shortcut('n').unwrap()));
+        assert_eq!(e.tool(), Tool::Step);
+        assert_eq!(
+            e.style(),
+            Style::DEFAULT,
+            "red, medium like the other tools"
+        );
+        click(&mut e, 20, 20);
+        click(&mut e, 60, 20);
+        click(&mut e, 100, 20);
+        assert_eq!(
+            e.items(),
+            &[step(20, 20, 1), step(60, 20, 2), step(100, 20, 3)]
+        );
+        assert_eq!(e.next_step_number(), 4);
+    }
+
+    #[test]
+    fn a_step_marker_is_placed_where_the_button_is_released() {
+        let mut e = Editor::new(200, 100);
+        e.set_tool(Tool::Step);
+        e.on_down(Point::new(20, 20));
+        e.on_move(Point::new(40, 30));
+        assert_eq!(e.preview(), Some(step(40, 30, 1)), "follows the pointer");
+        e.on_up(Point::new(50, 300)); // clamped into the image
+        assert_eq!(e.items(), &[step(50, 99, 1)]);
+    }
+
+    #[test]
+    fn undo_frees_the_last_number_and_deleting_does_not_renumber() {
+        let mut e = Editor::new(200, 100);
+        e.set_tool(Tool::Step);
+        for x in [20, 60, 100] {
+            click(&mut e, x, 20);
+        }
+        e.undo();
+        assert_eq!(e.next_step_number(), 3, "3 is free again");
+        click(&mut e, 140, 20);
+        assert_eq!(e.items().last(), Some(&step(140, 20, 3)));
+
+        e.set_tool(Tool::Select);
+        click(&mut e, 60, 20); // marker 2
+        assert!(e.delete_selected());
+        let numbers: Vec<u32> = e
+            .items()
+            .iter()
+            .filter_map(|i| match i {
+                Item::Step { number, .. } => Some(*number),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(numbers, vec![1, 3], "the others keep their numbers");
+        assert_eq!(e.next_step_number(), 4);
+    }
+
+    #[test]
+    fn step_markers_take_colour_and_size_and_can_be_selected_and_moved() {
+        let mut e = Editor::new(200, 100);
+        e.set_tool(Tool::Step);
+        e.set_color(Color::Yellow);
+        e.set_thickness(Thickness::Thick);
+        click(&mut e, 50, 50);
+        let big_yellow = Style {
+            color: Color::Yellow,
+            thickness: Thickness::Thick,
+        };
+        assert_eq!(
+            e.items()[0],
+            Item::Step {
+                at: Point::new(50, 50),
+                number: 1,
+                style: big_yellow
+            }
+        );
+        assert_eq!(e.items()[0].bounds(), Rect::new(28, 28, 44, 44));
+
+        e.set_tool(Tool::Select);
+        click(&mut e, 50 + 21, 50); // inside the 44-px circle, near its edge
+        assert!(e.selected().is_some());
+        assert!(e.color_enabled() && e.thickness_enabled());
+        e.set_color(Color::Blue);
+        e.on_down(Point::new(50, 50));
+        e.on_up(Point::new(500, 50)); // only the centre must stay inside
+        assert_eq!(
+            e.items()[0],
+            Item::Step {
+                at: Point::new(199, 50),
+                number: 1,
+                style: Style {
+                    color: Color::Blue,
+                    ..big_yellow
+                }
+            }
+        );
+    }
+
+    #[test]
+    fn step_hit_area_is_the_circle() {
+        let marker = step(50, 50, 1); // medium: 30 px across
+        assert!(marker.hit(Point::new(50, 64), 1));
+        assert!(marker.hit(Point::new(50, 66), 1), "within the slack");
+        assert!(
+            !marker.hit(Point::new(62, 62), 1),
+            "outside the circle, inside its box"
+        );
+    }
+
+    #[test]
+    fn step_numbers_contrast_with_their_fill() {
+        assert_eq!(Color::Red.contrast(), Color::White);
+        assert_eq!(Color::Blue.contrast(), Color::White);
+        assert_eq!(Color::Black.contrast(), Color::White);
+        assert_eq!(Color::Yellow.contrast(), Color::Black);
+        assert_eq!(Color::White.contrast(), Color::Black);
+        let sizes: Vec<i32> = Thickness::ALL.iter().map(|t| t.step_diameter()).collect();
+        assert!(sizes.windows(2).all(|w| w[0] < w[1]), "{sizes:?}");
     }
 }
