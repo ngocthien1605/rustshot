@@ -46,6 +46,12 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WM_SIZE, WM_SYSKEYDOWN, WNDCLASSW, WS_CHILD, WS_OVERLAPPEDWINDOW, WS_VISIBLE,
 };
 
+use windows::Win32::Graphics::Gdi::ScreenToClient;
+use windows::Win32::UI::Input::KeyboardAndMouse::VK_DELETE;
+use windows::Win32::UI::WindowsAndMessaging::{
+    GetCursorPos, SetCursor, HTCLIENT, IDC_ARROW, IDC_SIZEALL, WM_SETCURSOR,
+};
+
 use crate::platform::gdi::{ScreenDc, Surface};
 
 use super::model::{
@@ -59,17 +65,20 @@ static REGISTER: Once = Once::new();
 /// Toolbar height and canvas margin at 96 DPI; scaled by the window's DPI (see `dpi`).
 const TOOLBAR_H: i32 = 40;
 const MARGIN: i32 = 8;
+/// How far (screen px at 96 DPI) a click may miss an annotation and still select it.
+const HIT_SLOP: i32 = 5;
 /// Toolbar buttons: id, label, gap before the button, width, extra style — lengths at 96 DPI;
 /// each button's x is the running sum ([`button_x`]). The tool buttons are radio buttons (their
 /// ids must stay consecutive, in [`Tool::ALL`] order); the swatches and thickness buttons are
 /// owner-drawn (`WM_DRAWITEM`), their labels only name them for screen readers.
-const BUTTONS: [(i32, PCWSTR, i32, i32, u32); 19] = [
-    (ID_TOOL0, w!("Rectangle"), 8, 72, TOOL | WS_GROUP),
-    (ID_TOOL0 + 1, w!("Text"), 4, 44, TOOL),
-    (ID_TOOL0 + 2, w!("Arrow"), 4, 50, TOOL),
-    (ID_TOOL0 + 3, w!("Highlight"), 4, 64, TOOL),
-    (ID_TOOL0 + 4, w!("Pixelate"), 4, 60, TOOL),
-    (ID_TOOL0 + 5, w!("Black box"), 4, 66, TOOL),
+const BUTTONS: [(i32, PCWSTR, i32, i32, u32); 20] = [
+    (ID_TOOL0, w!("Select"), 8, 50, TOOL | WS_GROUP),
+    (ID_TOOL0 + 1, w!("Rectangle"), 4, 72, TOOL),
+    (ID_TOOL0 + 2, w!("Text"), 4, 44, TOOL),
+    (ID_TOOL0 + 3, w!("Arrow"), 4, 50, TOOL),
+    (ID_TOOL0 + 4, w!("Highlight"), 4, 64, TOOL),
+    (ID_TOOL0 + 5, w!("Pixelate"), 4, 60, TOOL),
+    (ID_TOOL0 + 6, w!("Black box"), 4, 66, TOOL),
     (ID_COLOR0, w!("Red"), 12, 26, BS_OWNERDRAW),
     (ID_COLOR0 + 1, w!("Yellow"), 2, 26, BS_OWNERDRAW),
     (ID_COLOR0 + 2, w!("Green"), 2, 26, BS_OWNERDRAW),
@@ -141,6 +150,8 @@ fn thickness_of(id: i32) -> Option<Thickness> {
 struct Shown {
     tool: Tool,
     style: Style,
+    colors: bool,
+    widths: bool,
     can_redo: bool,
 }
 
@@ -354,6 +365,8 @@ fn sync_toolbar(hwnd: HWND, ctx: &mut Ctx) {
     let now = Shown {
         tool: ctx.editor.tool(),
         style: ctx.editor.style(),
+        colors: ctx.editor.color_enabled(),
+        widths: ctx.editor.thickness_enabled(),
         can_redo: ctx.editor.can_redo(),
     };
     if ctx.shown == Some(now) {
@@ -374,9 +387,9 @@ fn show_toolbar(hwnd: HWND, now: Shown) {
         let _ = CheckRadioButton(hwnd, ID_TOOL0, ID_TOOL_LAST, tool_id);
         for (id, _, _, _, _) in BUTTONS {
             let enable = if color_of(id).is_some() {
-                now.tool.uses_color()
+                now.colors
             } else if thickness_of(id).is_some() {
-                now.tool.uses_thickness()
+                now.widths
             } else if id == ID_REDO {
                 now.can_redo
             } else {
@@ -549,6 +562,29 @@ unsafe fn wndproc_inner(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) ->
             LRESULT(0)
         }
         WM_ERASEBKGND => LRESULT(1), // we paint everything (double-buffered)
+        // Over the canvas with the Select tool: a move cursor on an annotation, else an arrow.
+        // Elsewhere (and with the drawing tools) the class cursor, the red crosshair.
+        WM_SETCURSOR
+            if wparam.0 == hwnd.0 as usize
+                && (lparam.0 & 0xFFFF) as u32 == HTCLIENT
+                && ctx.editor.tool() == Tool::Select =>
+        {
+            let mut pt = POINT::default();
+            // SAFETY: reads the cursor position and maps it into our client area.
+            let over_item = unsafe {
+                GetCursorPos(&mut pt).is_ok()
+                    && ScreenToClient(hwnd, &mut pt).as_bool()
+                    && ctx.editor.hit_test(ctx.view.to_image(pt.x, pt.y)).is_some()
+            };
+            let shape = if over_item { IDC_SIZEALL } else { IDC_ARROW };
+            // SAFETY: a shared system cursor, never freed.
+            unsafe {
+                if let Ok(cursor) = LoadCursorW(None, shape) {
+                    SetCursor(Some(cursor));
+                }
+            }
+            LRESULT(1)
+        }
         WM_PAINT => {
             paint(hwnd, ctx);
             LRESULT(0)
@@ -705,6 +741,8 @@ fn handle_key(hwnd: HWND, ctx: &mut Ctx, vk: u16) {
                 ctx.editor.on_enter();
             }
         }
+    } else if vk == VK_DELETE.0 && !ctx.editor.is_typing() {
+        ctx.editor.delete_selected();
     } else if vk == VK_ESCAPE.0 {
         if ctx.editor.on_escape() == EscapeResult::Nothing {
             // SAFETY: ask ourselves to close (runs the unsaved-changes prompt).
@@ -752,6 +790,9 @@ fn relayout(hwnd: HWND, ctx: &mut Ctx) {
         (rc.bottom - bar - 2 * margin).max(1),
     );
     ctx.view = View::fit(area, ctx.image.width() as i32, ctx.image.height() as i32);
+    // A click may miss an item by a few screen pixels, whatever the zoom.
+    ctx.editor
+        .set_hit_slop((f64::from(px(HIT_SLOP)) / ctx.view.scale).ceil() as i32);
 }
 
 fn redraw(hwnd: HWND) {
@@ -761,15 +802,19 @@ fn redraw(hwnd: HWND) {
     }
 }
 
-/// Rebuild the canvas source when the pixel items changed (a highlight or pixelate area drawn,
-/// undone or redone), so the screen shows the pixels the export will contain.
+/// Rebuild the canvas source when the pixel items changed (a highlight or redaction drawn,
+/// moved, undone or redone), so the screen shows the pixels the export will contain. A pixel
+/// item being dragged by the Select tool is left out (and drawn as a preview instead), so the
+/// drag costs one rebuild at its start and one at its end, not one per mouse move.
 fn sync_source(ctx: &mut Ctx) {
+    let moving = ctx.editor.moving_index();
     let pixels: Vec<Item> = ctx
         .editor
         .items()
         .iter()
-        .filter(|i| i.is_pixel())
-        .cloned()
+        .enumerate()
+        .filter(|&(i, item)| item.is_pixel() && Some(i) != moving)
+        .map(|(_, item)| item.clone())
         .collect();
     if pixels == ctx.src_pixels {
         return;
@@ -826,13 +871,30 @@ fn paint(hwnd: HWND, ctx: &mut Ctx) {
         // Keep annotations inside the picture while previewing.
         let saved = SaveDC(back);
         IntersectClipRect(back, v.ox, v.oy, v.ox + v.px(iw), v.oy + v.px(ih));
+        // The shape being drawn, or a pixel item being moved (left out of `src` meanwhile).
+        let preview = ctx.editor.preview().or_else(|| {
+            let item = ctx.editor.items().get(ctx.editor.moving_index()?)?;
+            item.is_pixel().then(|| item.clone())
+        });
         paint_items(
             back,
             ctx.editor.items(),
-            ctx.editor.preview().as_ref(),
+            preview.as_ref(),
             ctx.editor.typing(),
             v,
         );
+        if let Some(item) = ctx.editor.selected() {
+            // A dotted frame a few pixels outside the selected item.
+            let pad = crate::platform::dpi::scale(4, ctx.dpi);
+            let r = view_rect(v, item.bounds());
+            let frame = RECT {
+                left: r.left - pad,
+                top: r.top - pad,
+                right: r.right + pad,
+                bottom: r.bottom + pad,
+            };
+            let _ = DrawFocusRect(back, &frame);
+        }
         let _ = RestoreDC(back, saved);
 
         let _ = BitBlt(hdc, 0, 0, cw, ch, Some(back), 0, 0, SRCCOPY);

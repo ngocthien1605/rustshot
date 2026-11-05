@@ -111,6 +111,8 @@ impl Style {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tool {
+    /// Click an annotation to select it; drag to move it, `Delete` to remove it.
+    Select,
     /// Draw a rectangle outline.
     Rect,
     /// Draw a rectangle, then type text inside it.
@@ -127,7 +129,8 @@ pub enum Tool {
 }
 
 impl Tool {
-    pub const ALL: [Tool; 6] = [
+    pub const ALL: [Tool; 7] = [
+        Tool::Select,
         Tool::Rect,
         Tool::Text,
         Tool::Arrow,
@@ -138,12 +141,13 @@ impl Tool {
 
     fn index(self) -> usize {
         match self {
-            Tool::Rect => 0,
-            Tool::Text => 1,
-            Tool::Arrow => 2,
-            Tool::Highlight => 3,
-            Tool::Pixelate => 4,
-            Tool::BlackBox => 5,
+            Tool::Select => 0,
+            Tool::Rect => 1,
+            Tool::Text => 2,
+            Tool::Arrow => 3,
+            Tool::Highlight => 4,
+            Tool::Pixelate => 5,
+            Tool::BlackBox => 6,
         }
     }
 
@@ -159,8 +163,9 @@ impl Tool {
     }
 
     /// Whether the palette applies (a pixelate area has no colour; a black box is always black).
+    /// For Select it depends on the selected item: see [`Editor::color_enabled`].
     pub fn uses_color(self) -> bool {
-        !matches!(self, Tool::Pixelate | Tool::BlackBox)
+        !matches!(self, Tool::Select | Tool::Pixelate | Tool::BlackBox)
     }
 
     /// Whether the thickness applies (highlight, pixelate and black box are filled areas).
@@ -201,6 +206,132 @@ impl Item {
             Item::Highlight(..) | Item::Pixelate(_) | Item::BlackBox(_)
         )
     }
+
+    /// The item's style, for the toolbar while it is selected. A highlight reports its colour
+    /// (its line is unused); pixelate and black box have none.
+    pub fn style(&self) -> Option<Style> {
+        match self {
+            Item::Rect(_, style) | Item::Text { style, .. } | Item::Arrow { style, .. } => {
+                Some(*style)
+            }
+            Item::Highlight(_, color) => Some(Style {
+                color: *color,
+                ..Style::DEFAULT
+            }),
+            Item::Pixelate(_) | Item::BlackBox(_) => None,
+        }
+    }
+
+    pub fn uses_color(&self) -> bool {
+        self.style().is_some()
+    }
+
+    pub fn uses_thickness(&self) -> bool {
+        matches!(
+            self,
+            Item::Rect(..) | Item::Text { .. } | Item::Arrow { .. }
+        )
+    }
+
+    /// The item with its colour replaced (unchanged when it has none).
+    fn recolored(&self, color: Color) -> Item {
+        let mut item = self.clone();
+        match &mut item {
+            Item::Rect(_, style) | Item::Text { style, .. } | Item::Arrow { style, .. } => {
+                style.color = color
+            }
+            Item::Highlight(_, c) => *c = color,
+            Item::Pixelate(_) | Item::BlackBox(_) => {}
+        }
+        item
+    }
+
+    /// The item with its line thickness replaced (unchanged when it has none).
+    fn rethickened(&self, thickness: Thickness) -> Item {
+        let mut item = self.clone();
+        if let Item::Rect(_, style) | Item::Text { style, .. } | Item::Arrow { style, .. } =
+            &mut item
+        {
+            style.thickness = thickness;
+        }
+        item
+    }
+
+    /// The box that must stay inside the image when the item is moved: its rectangle, or for an
+    /// arrow the box spanned by its two ends.
+    pub fn bounds(&self) -> Rect {
+        match self {
+            Item::Rect(r, _)
+            | Item::Text { rect: r, .. }
+            | Item::Highlight(r, _)
+            | Item::Pixelate(r)
+            | Item::BlackBox(r) => *r,
+            Item::Arrow { from, to, .. } => Rect::from_points(*from, *to),
+        }
+    }
+
+    /// The item moved by `(dx, dy)`.
+    pub fn translated(&self, dx: i32, dy: i32) -> Item {
+        let mv = |r: &Rect| Rect::new(r.x + dx, r.y + dy, r.width, r.height);
+        let mp = |p: &Point| Point::new(p.x + dx, p.y + dy);
+        match self {
+            Item::Rect(r, style) => Item::Rect(mv(r), *style),
+            Item::Text { rect, text, style } => Item::Text {
+                rect: mv(rect),
+                text: text.clone(),
+                style: *style,
+            },
+            Item::Arrow { from, to, style } => Item::Arrow {
+                from: mp(from),
+                to: mp(to),
+                style: *style,
+            },
+            Item::Highlight(r, color) => Item::Highlight(mv(r), *color),
+            Item::Pixelate(r) => Item::Pixelate(mv(r)),
+            Item::BlackBox(r) => Item::BlackBox(mv(r)),
+        }
+    }
+
+    /// Whether a click at `p` picks this item, allowing `slop` image pixels of slack. Filled
+    /// items and text boxes are picked anywhere inside; a rectangle outline only near its edge
+    /// (so whatever is inside it can still be clicked); an arrow near its shaft or head.
+    pub fn hit(&self, p: Point, slop: i32) -> bool {
+        let grow =
+            |r: &Rect, d: i32| Rect::new(r.x - d, r.y - d, r.width + 2 * d, r.height + 2 * d);
+        match self {
+            Item::Rect(r, style) => {
+                let inner = grow(r, -(style.thickness.px() + slop));
+                grow(r, slop).contains(p) && (inner.is_empty() || !inner.contains(p))
+            }
+            Item::Text { rect: r, .. }
+            | Item::Highlight(r, _)
+            | Item::Pixelate(r)
+            | Item::BlackBox(r) => grow(r, slop).contains(p),
+            Item::Arrow { from, to, style } => {
+                let width = style.thickness.px();
+                let g = arrow_geometry(*from, *to, width);
+                let head = dist(g.tip, g.shaft_end);
+                dist_to_segment(p, *from, *to) <= f64::from(slop + width / 2 + 1)
+                    || dist(p, g.tip) <= head + f64::from(slop)
+            }
+        }
+    }
+}
+
+fn dist(a: Point, b: Point) -> f64 {
+    f64::from(a.x - b.x).hypot(f64::from(a.y - b.y))
+}
+
+/// Distance from `p` to the segment `a`–`b`.
+fn dist_to_segment(p: Point, a: Point, b: Point) -> f64 {
+    let (dx, dy) = (f64::from(b.x - a.x), f64::from(b.y - a.y));
+    let len2 = dx * dx + dy * dy;
+    if len2 == 0.0 {
+        return dist(p, a);
+    }
+    let t = ((f64::from(p.x - a.x) * dx + f64::from(p.y - a.y) * dy) / len2).clamp(0.0, 1.0);
+    let (cx, cy) = (f64::from(a.x) + t * dx, f64::from(a.y) + t * dy);
+    (f64::from(p.x) - cx).hypot(f64::from(p.y) - cy)
 }
 
 /// A one-key shortcut, available while no text box is being typed into (then keys are text).
@@ -212,11 +343,12 @@ pub enum Shortcut {
     Thicker,
 }
 
-/// The shortcut for a typed character: `R` `T` `A` `H` `P` `B` pick a tool, `1`–`6` a colour,
+/// The shortcut for a typed character: `S` `R` `T` `A` `H` `P` `B` pick a tool, `1`–`6` a colour,
 /// `[` / `]` step the thickness. Case-insensitive. Characters (not key codes) are matched, so
 /// the keys work the same on any keyboard layout.
 pub fn shortcut(c: char) -> Option<Shortcut> {
     Some(match c.to_ascii_lowercase() {
+        's' => Shortcut::Tool(Tool::Select),
         'r' => Shortcut::Tool(Tool::Rect),
         't' => Shortcut::Tool(Tool::Text),
         'a' => Shortcut::Tool(Tool::Arrow),
@@ -244,10 +376,22 @@ pub struct Typing {
 /// What `Esc` did, so the window knows whether to close.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EscapeResult {
-    /// Cancelled an in-progress drag or text entry.
+    /// Cancelled an in-progress drag, move or text entry, or cleared the selection.
     Cancelled,
     /// Nothing was in progress — the caller should close the editor.
     Nothing,
+}
+
+/// A selected item being dragged to a new place.
+#[derive(Debug)]
+struct Moving {
+    index: usize,
+    /// The item where the drag started; each step moves this copy, so clamping at an edge
+    /// never accumulates.
+    original: Item,
+    start: Point,
+    /// All items before the move, for undo.
+    before: Vec<Item>,
 }
 
 #[derive(Debug)]
@@ -256,10 +400,18 @@ pub struct Editor {
     height: i32,
     tool: Tool,
     items: Vec<Item>,
-    /// Items taken back by undo, most recent last; cleared when a new item is committed.
-    redo: Vec<Item>,
+    /// Earlier states of `items`, most recent last: every change (draw, move, delete, restyle)
+    /// records the state before it.
+    undo: Vec<Vec<Item>>,
+    /// States taken back by undo, most recent last; cleared by any new change.
+    redo: Vec<Vec<Item>>,
     drag: Option<(Point, Point)>,
     typing: Option<Typing>,
+    /// Index into `items` of the selected item (Select tool).
+    selected: Option<usize>,
+    moving: Option<Moving>,
+    /// How far (image px) a click may miss an item and still select it.
+    slop: i32,
     /// Each tool's style, indexed by [`Tool::index`].
     styles: [Style; Tool::ALL.len()],
 }
@@ -271,9 +423,13 @@ impl Editor {
             height,
             tool: Tool::Rect,
             items: Vec::new(),
+            undo: Vec::new(),
             redo: Vec::new(),
             drag: None,
             typing: None,
+            selected: None,
+            moving: None,
+            slop: 4,
             styles: Tool::ALL.map(Tool::default_style),
         }
     }
@@ -294,25 +450,101 @@ impl Editor {
         self.typing.is_some()
     }
 
-    /// The current tool's style (what the next shape will look like).
+    /// The selected item, if any (only with the Select tool).
+    pub fn selected(&self) -> Option<&Item> {
+        self.items.get(self.selected?)
+    }
+
+    /// Set how many image pixels a click may miss an item by (the window keeps this at a few
+    /// screen pixels, whatever the zoom).
+    pub fn set_hit_slop(&mut self, slop: i32) {
+        self.slop = slop.max(1);
+    }
+
+    /// The index of the item a click at `p` would select: the topmost one. Outlines, arrows and
+    /// text are drawn above the pixel items, so they are checked first.
+    pub fn hit_test(&self, p: Point) -> Option<usize> {
+        let top_down = |pixel: bool| {
+            self.items
+                .iter()
+                .enumerate()
+                .rev()
+                .filter(move |(_, it)| it.is_pixel() == pixel)
+        };
+        top_down(false)
+            .chain(top_down(true))
+            .find(|(_, it)| it.hit(p, self.slop))
+            .map(|(i, _)| i)
+    }
+
+    /// The style the toolbar shows: the selected item's (Select tool), otherwise the current
+    /// tool's — what the next shape will look like.
     pub fn style(&self) -> Style {
+        if self.tool == Tool::Select {
+            if let Some(style) = self.selected().and_then(Item::style) {
+                return style;
+            }
+        }
         self.styles[self.tool.index()]
     }
 
-    /// Pick a colour for the current tool. A text box being typed takes it too, so the colour
-    /// can be chosen after drawing the box.
+    /// Whether the colour swatches apply right now.
+    pub fn color_enabled(&self) -> bool {
+        match self.tool {
+            Tool::Select => self.selected().is_some_and(Item::uses_color),
+            tool => tool.uses_color(),
+        }
+    }
+
+    /// Whether the line-thickness buttons apply right now.
+    pub fn thickness_enabled(&self) -> bool {
+        match self.tool {
+            Tool::Select => self.selected().is_some_and(Item::uses_thickness),
+            tool => tool.uses_thickness(),
+        }
+    }
+
+    /// Pick a colour: for the selected item (Select tool; one undo step), otherwise for the
+    /// current tool. A text box being typed takes it too, so the colour can be chosen after
+    /// drawing the box.
     pub fn set_color(&mut self, color: Color) {
+        if self.tool == Tool::Select {
+            self.restyle(|item| item.recolored(color));
+            return;
+        }
         self.styles[self.tool.index()].color = color;
         if let Some(t) = self.typing.as_mut() {
             t.style.color = color;
         }
     }
 
-    /// Pick a thickness for the current tool (and the text box being typed, if any).
+    /// Pick a thickness: for the selected item (Select tool), otherwise for the current tool and
+    /// the text box being typed, if any.
     pub fn set_thickness(&mut self, thickness: Thickness) {
+        if self.tool == Tool::Select {
+            self.restyle(|item| item.rethickened(thickness));
+            return;
+        }
         self.styles[self.tool.index()].thickness = thickness;
         if let Some(t) = self.typing.as_mut() {
             t.style.thickness = thickness;
+        }
+    }
+
+    /// Replace the selected item by `change(item)`, as one undo step (none if nothing changes).
+    fn restyle(&mut self, change: impl Fn(&Item) -> Item) {
+        if self.moving.is_some() {
+            return;
+        }
+        let Some(i) = self.selected else {
+            return;
+        };
+        let Some(new) = self.items.get(i).map(&change) else {
+            return;
+        };
+        if self.items.get(i) != Some(&new) {
+            self.record();
+            self.items[i] = new;
         }
     }
 
@@ -324,12 +556,14 @@ impl Editor {
 
     /// What the current drag would commit, to draw it live: the tool's own shape (an arrow, a
     /// highlight, a pixelate area; an outline for the Text tool's box). Shown at any size,
-    /// although a drag below [`MIN_SIZE`] is discarded on release.
+    /// although a drag below [`MIN_SIZE`] is discarded on release. Nothing for Select, which
+    /// moves the item itself.
     pub fn preview(&self) -> Option<Item> {
         let (a, b) = self.drag?;
         let r = self.normalized(a, b);
         let style = self.styles[self.tool.index()];
         Some(match self.tool {
+            Tool::Select => return None,
             Tool::Rect | Tool::Text => Item::Rect(r, style),
             Tool::Arrow => Item::Arrow {
                 from: a,
@@ -342,10 +576,13 @@ impl Editor {
         })
     }
 
-    /// Switch tool. Any text being typed is committed first (or dropped if empty).
+    /// Switch tool. Any text being typed is committed first (or dropped if empty); a move in
+    /// progress is cancelled and the selection cleared.
     pub fn set_tool(&mut self, tool: Tool) {
         self.commit_typing();
+        self.cancel_move();
         self.drag = None;
+        self.selected = None;
         self.tool = tool;
     }
 
@@ -353,21 +590,55 @@ impl Editor {
         // Clicking away from a text box finishes it, as in most editors.
         self.commit_typing();
         let p = self.clamp(p);
+        if self.tool == Tool::Select {
+            self.selected = self.hit_test(p);
+            self.moving = self.selected.and_then(|index| {
+                Some(Moving {
+                    index,
+                    original: self.items.get(index)?.clone(),
+                    start: p,
+                    before: self.items.clone(),
+                })
+            });
+            return;
+        }
         self.drag = Some((p, p));
     }
 
     pub fn on_move(&mut self, p: Point) {
         let p = self.clamp(p);
+        if let Some(m) = &self.moving {
+            let moved = self.moved(&m.original, p.x - m.start.x, p.y - m.start.y);
+            let index = m.index;
+            if let Some(item) = self.items.get_mut(index) {
+                *item = moved;
+            }
+            return;
+        }
         if let Some((_, end)) = self.drag.as_mut() {
             *end = p;
         }
     }
 
-    /// Finish the drag. A big-enough shape is committed (or, for the Text tool, becomes a text
-    /// box awaiting typing); a tiny one — an accidental click — is discarded. Boxes need
-    /// [`MIN_SIZE`] on both axes, an arrow needs that length (a level arrow has no height).
+    /// `item` moved by up to `(dx, dy)`, stopping where its [`Item::bounds`] would leave the
+    /// image.
+    fn moved(&self, item: &Item, dx: i32, dy: i32) -> Item {
+        let b = item.bounds();
+        let (max_x, max_y) = ((self.width - 1).max(0), (self.height - 1).max(0));
+        let fit = |d: i32, lo: i32, hi: i32| d.max(lo).min(hi.max(lo));
+        let dx = fit(dx, -b.left(), max_x - b.right());
+        let dy = fit(dy, -b.top(), max_y - b.bottom());
+        item.translated(dx, dy)
+    }
+
+    /// The index of the item being dragged by the Select tool, if any.
+    pub fn moving_index(&self) -> Option<usize> {
+        self.moving.as_ref().map(|m| m.index)
+    }
+
+    /// True while the mouse button is down on something being drawn or moved.
     pub fn is_dragging(&self) -> bool {
-        self.drag.is_some()
+        self.drag.is_some() || self.moving.is_some()
     }
 
     /// Apply a one-key [`Shortcut`]. Returns false (and does nothing) while typing, when the key
@@ -385,8 +656,19 @@ impl Editor {
         true
     }
 
+    /// Finish the drag. A big-enough shape is committed (or, for the Text tool, becomes a text
+    /// box awaiting typing); a tiny one — an accidental click — is discarded. Boxes need
+    /// [`MIN_SIZE`] on both axes, an arrow needs that length (a level arrow has no height). A
+    /// move that changed something becomes one undo step.
     pub fn on_up(&mut self, p: Point) {
         self.on_move(p);
+        if let Some(m) = self.moving.take() {
+            if m.before != self.items {
+                self.undo.push(m.before);
+                self.redo.clear();
+            }
+            return;
+        }
         let Some((a, b)) = self.drag.take() else {
             return;
         };
@@ -410,7 +692,7 @@ impl Editor {
             Tool::Highlight => self.push(Item::Highlight(r, style.color)),
             Tool::Pixelate => self.push(Item::Pixelate(r)),
             Tool::BlackBox => self.push(Item::BlackBox(r)),
-            Tool::Arrow => {} // handled above
+            Tool::Arrow | Tool::Select => {} // handled above
             Tool::Text => {
                 self.typing = Some(Typing {
                     rect: r,
@@ -419,6 +701,22 @@ impl Editor {
                 })
             }
         }
+    }
+
+    /// `Delete`: remove the selected item (one undo step). Returns true if one was removed.
+    pub fn delete_selected(&mut self) -> bool {
+        if self.moving.is_some() {
+            return false;
+        }
+        let Some(i) = self.selected.take() else {
+            return false;
+        };
+        if i >= self.items.len() {
+            return false;
+        }
+        self.record();
+        self.items.remove(i);
+        true
     }
 
     /// A typed character. Control characters are ignored (Enter/Backspace have own methods).
@@ -451,39 +749,47 @@ impl Editor {
         was_typing
     }
 
+    /// `Esc`: cancel what is in progress (a drag, a move, a text box), else clear the selection;
+    /// with nothing of the kind, report [`EscapeResult::Nothing`] so the window can close.
     pub fn on_escape(&mut self) -> EscapeResult {
-        if self.drag.take().is_some() || self.typing.take().is_some() {
+        if self.cancel_move()
+            || self.drag.take().is_some()
+            || self.typing.take().is_some()
+            || self.selected.take().is_some()
+        {
             EscapeResult::Cancelled
         } else {
             EscapeResult::Nothing
         }
     }
 
-    /// Undo: cancel an in-progress shape, otherwise take back the last committed one (it can be
-    /// redone). Returns true when a committed item was taken back.
+    /// Undo: cancel an in-progress shape or move, otherwise go back to the state before the
+    /// last change (it can be redone). Returns true when a change was undone.
     pub fn undo(&mut self) -> bool {
-        if self.drag.take().is_some() || self.typing.take().is_some() {
+        if self.cancel_move() || self.drag.take().is_some() || self.typing.take().is_some() {
             return false;
         }
-        match self.items.pop() {
-            Some(item) => {
-                self.redo.push(item);
+        match self.undo.pop() {
+            Some(before) => {
+                self.redo.push(std::mem::replace(&mut self.items, before));
+                self.selected = None;
                 true
             }
             None => false,
         }
     }
 
-    /// Redo: put back the item the last undo took. Does nothing while a shape or text box is in
-    /// progress (finish or cancel it first), or once a new item has been committed since the
-    /// undo. Returns true when an item was put back.
+    /// Redo: reapply the change the last undo took back. Does nothing while a shape, move or
+    /// text box is in progress (finish or cancel it first), or once a new change has been made
+    /// since the undo. Returns true when a change was redone.
     pub fn redo(&mut self) -> bool {
-        if self.drag.is_some() || self.typing.is_some() {
+        if !self.idle() {
             return false;
         }
         match self.redo.pop() {
-            Some(item) => {
-                self.items.push(item);
+            Some(after) => {
+                self.undo.push(std::mem::replace(&mut self.items, after));
+                self.selected = None;
                 true
             }
             None => false,
@@ -491,12 +797,34 @@ impl Editor {
     }
 
     pub fn can_redo(&self) -> bool {
-        !self.redo.is_empty() && self.drag.is_none() && self.typing.is_none()
+        !self.redo.is_empty() && self.idle()
     }
 
-    /// Commit a new item. A new item starts a new history branch, so the redo list is dropped.
-    fn push(&mut self, item: Item) {
+    /// Nothing is being drawn, moved or typed.
+    fn idle(&self) -> bool {
+        self.drag.is_none() && self.typing.is_none() && self.moving.is_none()
+    }
+
+    /// Put a moved item back where the move started. Returns true if a move was in progress.
+    fn cancel_move(&mut self) -> bool {
+        match self.moving.take() {
+            Some(m) => {
+                self.items = m.before;
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Remember the current items before a change; a new change drops the redo list.
+    fn record(&mut self) {
+        self.undo.push(self.items.clone());
         self.redo.clear();
+    }
+
+    /// Commit a new item (one undo step).
+    fn push(&mut self, item: Item) {
+        self.record();
         self.items.push(item);
     }
 
@@ -1120,10 +1448,6 @@ mod tests {
         }
     }
 
-    fn dist(a: Point, b: Point) -> f64 {
-        f64::from(a.x - b.x).hypot(f64::from(a.y - b.y))
-    }
-
     #[test]
     fn arrow_head_points_at_the_end_and_is_symmetric() {
         let g = arrow_geometry(Point::new(10, 50), Point::new(110, 50), 3);
@@ -1240,7 +1564,8 @@ mod tests {
 
     #[test]
     fn which_tools_use_colour_and_thickness() {
-        for tool in Tool::ALL {
+        // Select has no style of its own: it shows the selected item's (tested separately).
+        for tool in Tool::ALL.into_iter().filter(|t| *t != Tool::Select) {
             let filled = matches!(tool, Tool::Highlight | Tool::Pixelate | Tool::BlackBox);
             assert_eq!(tool.uses_thickness(), !filled, "{tool:?}");
             let colourless = matches!(tool, Tool::Pixelate | Tool::BlackBox);
@@ -1508,5 +1833,315 @@ mod tests {
             &[Item::BlackBox(area)],
         );
         assert_eq!(out.get_pixel(10, 8), other.get_pixel(10, 8));
+    }
+
+    /// An editor with a rectangle outline (10,10)-(60,40) and a black box (100,10)-(140,40).
+    fn with_two_items() -> Editor {
+        let mut e = Editor::new(200, 100);
+        drag(&mut e, (10, 10), (60, 40));
+        e.set_tool(Tool::BlackBox);
+        drag(&mut e, (100, 10), (140, 40));
+        e.set_tool(Tool::Select);
+        e
+    }
+
+    fn click(e: &mut Editor, x: i32, y: i32) {
+        e.on_down(Point::new(x, y));
+        e.on_up(Point::new(x, y));
+    }
+
+    #[test]
+    fn select_picks_by_outline_edge_or_filled_area() {
+        let mut e = with_two_items();
+        click(&mut e, 11, 25); // on the rectangle's left edge
+        assert_eq!(e.selected(), Some(&e.items()[0]));
+        click(&mut e, 35, 25); // inside the hollow rectangle: nothing there
+        assert_eq!(e.selected(), None);
+        click(&mut e, 120, 25); // anywhere inside the black box
+        assert_eq!(e.selected(), Some(&e.items()[1]));
+        click(&mut e, 180, 90); // empty space clears the selection
+        assert_eq!(e.selected(), None);
+        assert_eq!(e.items().len(), 2, "selecting changes nothing");
+    }
+
+    #[test]
+    fn hit_slop_allows_a_near_miss() {
+        let mut e = with_two_items();
+        e.set_hit_slop(3);
+        click(&mut e, 97, 25); // 3 px left of the black box
+        assert!(e.selected().is_some());
+        click(&mut e, 95, 25); // 5 px: a miss
+        assert!(e.selected().is_none());
+        e.set_hit_slop(0); // never below 1
+        click(&mut e, 99, 25);
+        assert!(e.selected().is_some());
+    }
+
+    #[test]
+    fn the_topmost_item_wins_and_outlines_beat_pixel_items() {
+        let mut e = Editor::new(200, 100);
+        e.set_tool(Tool::Highlight);
+        drag(&mut e, (10, 10), (100, 60)); // index 0, a pixel item
+        e.set_tool(Tool::Rect);
+        drag(&mut e, (40, 20), (80, 50)); // index 1, outline over it
+        e.set_tool(Tool::Highlight);
+        drag(&mut e, (20, 15), (90, 55)); // index 2, drawn last but under the outline
+        e.set_tool(Tool::Select);
+        assert_eq!(e.hit_test(Point::new(41, 30)), Some(1), "outline on top");
+        assert_eq!(e.hit_test(Point::new(60, 35)), Some(2), "latest highlight");
+        assert_eq!(e.hit_test(Point::new(12, 12)), Some(0));
+    }
+
+    #[test]
+    fn arrows_are_picked_near_the_shaft_or_head() {
+        let mut e = Editor::new(200, 100);
+        e.set_tool(Tool::Arrow);
+        drag(&mut e, (20, 50), (120, 50));
+        e.set_tool(Tool::Select);
+        e.set_hit_slop(2);
+        assert_eq!(e.hit_test(Point::new(60, 52)), Some(0), "by the shaft");
+        assert_eq!(e.hit_test(Point::new(110, 56)), Some(0), "by a barb");
+        assert_eq!(e.hit_test(Point::new(60, 60)), None);
+    }
+
+    #[test]
+    fn dragging_a_selected_item_moves_it_as_one_undo_step() {
+        let mut e = with_two_items();
+        e.on_down(Point::new(11, 25));
+        assert!(e.is_dragging());
+        assert_eq!(e.moving_index(), Some(0));
+        e.on_move(Point::new(21, 30));
+        e.on_move(Point::new(31, 35)); // live, from the original each time
+        e.on_up(Point::new(41, 45));
+        assert_eq!(
+            e.items()[0],
+            Item::Rect(Rect::new(40, 30, 50, 30), Style::DEFAULT)
+        );
+        assert_eq!(e.preview(), None, "Select draws no rubber band");
+        assert_eq!(e.moving_index(), None);
+        assert!(e.undo());
+        assert_eq!(
+            e.items()[0],
+            Item::Rect(Rect::new(10, 10, 50, 30), Style::DEFAULT)
+        );
+        assert!(e.redo());
+        assert_eq!(e.items()[0].bounds(), Rect::new(40, 30, 50, 30));
+        // The black box drawn before the move is untouched by both.
+        assert_eq!(e.items()[1], Item::BlackBox(Rect::new(100, 10, 40, 30)));
+    }
+
+    #[test]
+    fn a_click_without_moving_records_nothing() {
+        let mut e = with_two_items();
+        click(&mut e, 120, 25);
+        e.undo(); // takes back the black box itself, not a no-op "move"
+        assert_eq!(e.items().len(), 1);
+    }
+
+    #[test]
+    fn moving_stops_at_the_image_edges() {
+        let mut e = with_two_items();
+        e.on_down(Point::new(120, 25));
+        e.on_up(Point::new(400, -300)); // far up-right
+        assert_eq!(e.items()[1], Item::BlackBox(Rect::new(159, 0, 40, 30)));
+        e.on_down(Point::new(170, 10));
+        e.on_up(Point::new(-50, 500)); // far down-left
+        assert_eq!(e.items()[1], Item::BlackBox(Rect::new(0, 69, 40, 30)));
+    }
+
+    #[test]
+    fn arrows_and_text_move_whole() {
+        let mut e = Editor::new(200, 100);
+        e.set_tool(Tool::Arrow);
+        drag(&mut e, (20, 50), (120, 50));
+        e.set_tool(Tool::Text);
+        drag(&mut e, (10, 60), (60, 90));
+        type_str(&mut e, "hi");
+        e.on_enter();
+        e.set_tool(Tool::Select);
+        e.on_down(Point::new(60, 50));
+        e.on_up(Point::new(70, 40));
+        assert_eq!(
+            e.items()[0],
+            Item::Arrow {
+                from: Point::new(30, 40),
+                to: Point::new(130, 40),
+                style: Style::DEFAULT
+            }
+        );
+        e.on_down(Point::new(30, 75));
+        e.on_up(Point::new(130, 65));
+        assert_eq!(
+            e.items()[1],
+            Item::Text {
+                rect: Rect::new(110, 50, 50, 30),
+                text: "hi".into(),
+                style: Style::DEFAULT
+            }
+        );
+    }
+
+    #[test]
+    fn delete_removes_the_selected_item_and_undo_restores_it() {
+        let mut e = with_two_items();
+        assert!(!e.delete_selected(), "nothing selected");
+        click(&mut e, 11, 25);
+        assert!(e.delete_selected());
+        assert_eq!(e.items(), &[Item::BlackBox(Rect::new(100, 10, 40, 30))]);
+        assert_eq!(e.selected(), None);
+        assert!(!e.delete_selected(), "the selection went with it");
+        assert!(e.undo());
+        assert_eq!(e.items().len(), 2);
+        assert_eq!(
+            e.items()[0],
+            Item::Rect(Rect::new(10, 10, 50, 30), Style::DEFAULT)
+        );
+    }
+
+    #[test]
+    fn escape_cancels_a_move_then_clears_the_selection_then_closes() {
+        let mut e = with_two_items();
+        e.on_down(Point::new(120, 25));
+        e.on_move(Point::new(150, 50));
+        assert_eq!(e.on_escape(), EscapeResult::Cancelled);
+        assert_eq!(
+            e.items()[1],
+            Item::BlackBox(Rect::new(100, 10, 40, 30)),
+            "put back"
+        );
+        assert!(!e.is_dragging());
+        assert!(
+            e.selected().is_some(),
+            "still selected after the cancelled move"
+        );
+        assert_eq!(e.on_escape(), EscapeResult::Cancelled);
+        assert!(e.selected().is_none());
+        assert_eq!(e.on_escape(), EscapeResult::Nothing);
+    }
+
+    #[test]
+    fn undo_mid_move_cancels_the_move_only() {
+        let mut e = with_two_items();
+        e.on_down(Point::new(120, 25));
+        e.on_move(Point::new(150, 50));
+        assert!(!e.undo());
+        assert_eq!(e.items().len(), 2);
+        assert_eq!(e.items()[1], Item::BlackBox(Rect::new(100, 10, 40, 30)));
+    }
+
+    #[test]
+    fn switching_tool_clears_the_selection_and_cancels_a_move() {
+        let mut e = with_two_items();
+        e.on_down(Point::new(120, 25));
+        e.on_move(Point::new(150, 50));
+        e.set_tool(Tool::Rect);
+        assert_eq!(e.items()[1], Item::BlackBox(Rect::new(100, 10, 40, 30)));
+        e.set_tool(Tool::Select);
+        assert!(e.selected().is_none());
+    }
+
+    #[test]
+    fn colour_and_line_restyle_the_selected_item() {
+        let mut e = with_two_items();
+        assert!(
+            !e.color_enabled() && !e.thickness_enabled(),
+            "nothing selected"
+        );
+        click(&mut e, 11, 25);
+        assert!(e.color_enabled() && e.thickness_enabled());
+        assert_eq!(
+            e.style(),
+            Style::DEFAULT,
+            "the toolbar shows the item's style"
+        );
+        e.set_color(Color::Blue);
+        e.apply_shortcut(Shortcut::Thicker);
+        let restyled = Style {
+            color: Color::Blue,
+            thickness: Thickness::Thick,
+        };
+        assert_eq!(
+            e.items()[0],
+            Item::Rect(Rect::new(10, 10, 50, 30), restyled)
+        );
+        assert_eq!(e.style(), restyled);
+        // Two changes, two undo steps; the Rectangle tool's own style never changed.
+        e.undo();
+        assert_eq!(
+            e.items()[0],
+            Item::Rect(
+                Rect::new(10, 10, 50, 30),
+                Style {
+                    color: Color::Blue,
+                    ..Style::DEFAULT
+                }
+            )
+        );
+        e.set_tool(Tool::Rect);
+        assert_eq!(e.style(), Style::DEFAULT);
+    }
+
+    #[test]
+    fn redaction_items_have_no_colour_to_restyle() {
+        let mut e = with_two_items();
+        click(&mut e, 120, 25);
+        assert!(!e.color_enabled() && !e.thickness_enabled());
+        let before = e.items().to_vec();
+        e.set_color(Color::Red);
+        e.set_thickness(Thickness::Thin);
+        assert_eq!(e.items(), &before[..]);
+        e.undo(); // so nothing was recorded: this takes back the black box itself
+        assert_eq!(e.items().len(), 1);
+    }
+
+    #[test]
+    fn a_highlight_can_be_recoloured_but_has_no_line() {
+        let mut e = Editor::new(200, 100);
+        e.set_tool(Tool::Highlight);
+        drag(&mut e, (10, 10), (60, 40));
+        e.set_tool(Tool::Select);
+        click(&mut e, 30, 20);
+        assert!(e.color_enabled() && !e.thickness_enabled());
+        e.set_color(Color::Green);
+        assert_eq!(
+            e.items(),
+            &[Item::Highlight(Rect::new(10, 10, 50, 30), Color::Green)]
+        );
+    }
+
+    #[test]
+    fn selecting_an_item_while_typing_commits_the_text_first() {
+        let mut e = with_two_items();
+        e.set_tool(Tool::Text);
+        drag(&mut e, (10, 60), (60, 90));
+        type_str(&mut e, "x");
+        e.set_tool(Tool::Select);
+        assert_eq!(e.items().len(), 3, "switching tool committed it");
+        click(&mut e, 30, 75);
+        assert!(matches!(e.selected(), Some(Item::Text { .. })));
+    }
+
+    #[test]
+    fn select_shortcut_and_item_geometry_helpers() {
+        assert_eq!(shortcut('s'), Some(Shortcut::Tool(Tool::Select)));
+        let arrow = Item::Arrow {
+            from: Point::new(50, 40),
+            to: Point::new(10, 20),
+            style: Style::DEFAULT,
+        };
+        assert_eq!(arrow.bounds(), Rect::new(10, 20, 40, 20));
+        assert_eq!(arrow.translated(5, -5).bounds(), Rect::new(15, 15, 40, 20));
+        assert_eq!(
+            dist_to_segment(Point::new(5, 5), Point::new(0, 0), Point::new(10, 0)),
+            5.0
+        );
+        assert_eq!(
+            dist_to_segment(Point::new(-3, 4), Point::new(0, 0), Point::new(10, 0)),
+            5.0
+        );
+        assert_eq!(
+            dist_to_segment(Point::new(3, 4), Point::new(0, 0), Point::new(0, 0)),
+            5.0
+        );
     }
 }
