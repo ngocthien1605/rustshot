@@ -29,8 +29,11 @@ portable zip, no installer. How to use it: **[Manual Guide](docs/MANUAL-GUIDE.md
   Copy, Copy Path, Delete.
 - **Annotate** — rectangles, text, arrows, numbered step markers and a translucent highlighter
   in a six-colour palette with three line widths (red by default); irreversible **pixelate** and
-  **black box** redaction; select, move, restyle and delete marks; undo/redo; then save an
-  annotated copy or copy it to the clipboard.
+  **black box** redaction; **crop**; select, move, restyle and delete marks; undo/redo; then
+  save an annotated copy or copy it to the clipboard.
+- **Pin to screen** — keep a screenshot on top of every window, movable and zoomable.
+- **History** — a list of recent screenshots and recordings to open, annotate, pin, copy or
+  delete.
 - **Clipboard** — copy captures straight to the clipboard as an image.
 - **Screen recording** — continuous Windows Graphics Capture → Media Foundation **H.264/MP4**,
   with constant-frame-rate pacing, pause/resume, and a recording toolbar.

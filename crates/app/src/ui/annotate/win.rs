@@ -57,8 +57,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use crate::platform::gdi::{ScreenDc, Surface};
 
 use super::model::{
-    apply_pixel_layer, arrow_geometry, enter_action, font_px, shortcut, Color, Editor, EnterAction,
-    EscapeResult, Item, Style, Thickness, Tool, Typing, View, HIGHLIGHT_ALPHA,
+    apply_pixel_layer, arrow_geometry, enter_action, font_px, shortcut, Color, Doc, Editor,
+    EnterAction, EscapeResult, Item, Style, Thickness, Tool, Typing, View, HIGHLIGHT_ALPHA,
 };
 
 const CLASS_NAME: PCWSTR = w!("RustShotAnnotate");
@@ -69,19 +69,22 @@ const TOOLBAR_H: i32 = 40;
 const MARGIN: i32 = 8;
 /// How far (screen px at 96 DPI) a click may miss an annotation and still select it.
 const HIT_SLOP: i32 = 5;
+/// How dark the part outside a crop is shown (about 60 % black).
+const CROP_SHADE_ALPHA: u8 = 150;
 /// Toolbar buttons: id, label, gap before the button, width, extra style — lengths at 96 DPI;
 /// each button's x is the running sum ([`button_x`]). The tool buttons are radio buttons (their
 /// ids must stay consecutive, in [`Tool::ALL`] order); the swatches and thickness buttons are
 /// owner-drawn (`WM_DRAWITEM`), their labels only name them for screen readers.
-const BUTTONS: [(i32, PCWSTR, i32, i32, u32); 21] = [
+const BUTTONS: [(i32, PCWSTR, i32, i32, u32); 22] = [
     (ID_TOOL0, w!("Select"), 8, 50, TOOL | WS_GROUP),
-    (ID_TOOL0 + 1, w!("Rectangle"), 4, 72, TOOL),
-    (ID_TOOL0 + 2, w!("Text"), 4, 44, TOOL),
-    (ID_TOOL0 + 3, w!("Arrow"), 4, 50, TOOL),
-    (ID_TOOL0 + 4, w!("Highlight"), 4, 64, TOOL),
-    (ID_TOOL0 + 5, w!("Pixelate"), 4, 60, TOOL),
-    (ID_TOOL0 + 6, w!("Black box"), 4, 66, TOOL),
-    (ID_TOOL0 + 7, w!("Step"), 4, 44, TOOL),
+    (ID_TOOL0 + 1, w!("Crop"), 4, 44, TOOL),
+    (ID_TOOL0 + 2, w!("Rectangle"), 4, 72, TOOL),
+    (ID_TOOL0 + 3, w!("Text"), 4, 44, TOOL),
+    (ID_TOOL0 + 4, w!("Arrow"), 4, 50, TOOL),
+    (ID_TOOL0 + 5, w!("Highlight"), 4, 64, TOOL),
+    (ID_TOOL0 + 6, w!("Pixelate"), 4, 60, TOOL),
+    (ID_TOOL0 + 7, w!("Black box"), 4, 66, TOOL),
+    (ID_TOOL0 + 8, w!("Step"), 4, 44, TOOL),
     (ID_COLOR0, w!("Red"), 12, 26, BS_OWNERDRAW),
     (ID_COLOR0 + 1, w!("Yellow"), 2, 26, BS_OWNERDRAW),
     (ID_COLOR0 + 2, w!("Green"), 2, 26, BS_OWNERDRAW),
@@ -171,8 +174,9 @@ struct Ctx {
     source: PathBuf,
     /// Last view mapping computed by layout.
     view: View,
-    /// The items as last saved; the editor has unsaved work when its items differ (and exist).
-    saved: Vec<Item>,
+    /// The annotations and crop as last saved; the editor has unsaved work when its own differ
+    /// (and there are any).
+    saved: Doc,
     /// Pending UTF-16 high surrogate from a `WM_CHAR` pair.
     high_surrogate: Option<u16>,
     /// DPI of the monitor the window is on; layout lengths are scaled by it.
@@ -186,7 +190,8 @@ impl Ctx {
     /// Annotations that are not in a saved file yet. An editor emptied by undo has nothing to
     /// save, so it is not dirty either.
     fn dirty(&self) -> bool {
-        !self.editor.items().is_empty() && self.editor.items() != self.saved.as_slice()
+        let now = self.editor.doc();
+        !now.is_empty() && now != self.saved
     }
 }
 
@@ -218,7 +223,7 @@ fn try_open(path: &Path) -> Result<()> {
         src_pixels: Vec::new(),
         source: path.to_path_buf(),
         view: View::IDENTITY,
-        saved: Vec::new(),
+        saved: Doc::default(),
         high_surrogate: None,
         dpi: crate::platform::dpi::BASE,
         font: None,
@@ -886,6 +891,13 @@ fn paint(hwnd: HWND, ctx: &mut Ctx) {
             ctx.editor.typing(),
             v,
         );
+        if let Some(crop) = ctx.editor.shown_crop() {
+            shade_outside(
+                back,
+                view_rect(v, crop),
+                view_rect(v, Rect::new(0, 0, iw, ih)),
+            );
+        }
         if let Some(item) = ctx.editor.selected() {
             // A dotted frame a few pixels outside the selected item.
             let pad = crate::platform::dpi::scale(4, ctx.dpi);
@@ -968,10 +980,48 @@ fn paint_preview(hdc: HDC, item: &Item, view: View) {
     }
 }
 
-/// `r` filled with `color` at the highlighter's opacity: a 1×1 DIB of the colour stretched over
-/// it with a constant-alpha blend.
+/// Darken everything in `image` outside `keep` (both in device px) and frame `keep`: what a crop
+/// will cut off.
+fn shade_outside(hdc: HDC, keep: RECT, image: RECT) {
+    let bands = [
+        RECT {
+            bottom: keep.top,
+            ..image
+        },
+        RECT {
+            top: keep.bottom,
+            ..image
+        },
+        RECT {
+            top: keep.top,
+            bottom: keep.bottom,
+            right: keep.left,
+            ..image
+        },
+        RECT {
+            top: keep.top,
+            bottom: keep.bottom,
+            left: keep.right,
+            ..image
+        },
+    ];
+    for band in bands {
+        blend_fill(hdc, band, [0, 0, 0], CROP_SHADE_ALPHA);
+    }
+    // SAFETY: draws a dotted (XOR) frame on the DC we are given.
+    unsafe {
+        let _ = DrawFocusRect(hdc, &keep);
+    }
+}
+
+/// `r` filled with `color` at the highlighter's opacity.
 fn alpha_fill(hdc: HDC, r: Rect, color: Color, view: View) {
-    let vr = view_rect(view, r);
+    blend_fill(hdc, view_rect(view, r), color.rgb(), HIGHLIGHT_ALPHA);
+}
+
+/// `vr` (device px) filled with `rgb` at opacity `alpha`: a 1×1 DIB of the colour stretched
+/// over it with a constant-alpha blend.
+fn blend_fill(hdc: HDC, vr: RECT, rgb: [u8; 3], alpha: u8) {
     let (w, h) = (vr.right - vr.left, vr.bottom - vr.top);
     if w <= 0 || h <= 0 {
         return;
@@ -982,14 +1032,14 @@ fn alpha_fill(hdc: HDC, r: Rect, color: Color, view: View) {
     let Ok(mut dot) = Surface::dib(screen.0, 1, 1) else {
         return;
     };
-    let [red, green, blue] = color.rgb();
+    let [red, green, blue] = rgb;
     if let Some(px) = dot.pixels_mut() {
         px.copy_from_slice(&[blue, green, red, 255]);
     }
     let blend = BLENDFUNCTION {
         BlendOp: AC_SRC_OVER as u8,
         BlendFlags: 0,
-        SourceConstantAlpha: HIGHLIGHT_ALPHA,
+        SourceConstantAlpha: alpha,
         AlphaFormat: 0,
     };
     // SAFETY: blends our 1×1 DIB onto the DC we are given.
@@ -1173,17 +1223,7 @@ fn draw_text(hdc: HDC, rect: Rect, text: &str, color: Color, view: View) {
 
 /// The screenshot as a DIB-backed memory DC (top-down BGRA, opaque).
 fn make_source_dc(img: &Rgba) -> Result<Surface> {
-    let screen = ScreenDc::get()?;
-    let mut surface = Surface::dib(screen.0, img.width() as i32, img.height() as i32)?;
-    let dst = surface
-        .pixels_mut()
-        .ok_or_else(|| anyhow!("CreateDIBSection returned no pixel buffer"))?;
-    let (dst_px, _) = dst.as_chunks_mut::<4>();
-    let (src_px, _) = img.as_raw().as_chunks::<4>();
-    for (d, s) in dst_px.iter_mut().zip(src_px) {
-        *d = [s[2], s[1], s[0], 255];
-    }
-    Ok(surface)
+    crate::platform::gdi::surface_from_rgba(img)
 }
 
 /// Render `items` onto a copy of `img` at full resolution (what Save/Copy produce): the pixel
@@ -1196,15 +1236,19 @@ pub fn render(img: &Rgba, items: &[Item]) -> Result<Rgba> {
         paint_items(surface.dc, items, None, None, View::IDENTITY);
         let _ = GdiFlush();
     }
-    let src = surface
-        .pixels()
-        .ok_or_else(|| anyhow!("rendered surface has no pixels"))?;
-    let mut rgba = Vec::with_capacity(src.len());
-    for p in src.as_chunks::<4>().0 {
-        rgba.extend_from_slice(&[p[2], p[1], p[0], 255]);
+    crate::platform::gdi::rgba_from_surface(&surface, img.width(), img.height())
+        .ok_or_else(|| anyhow!("rendered surface has no pixels of the right size"))
+}
+
+/// What Save and Copy produce: [`render`] at full resolution, then cut to `crop` (clamped to the
+/// image; a crop entirely outside it keeps the whole image).
+pub fn export(img: &Rgba, items: &[Item], crop: Option<Rect>) -> Result<Rgba> {
+    let out = render(img, items)?;
+    let whole = Rect::new(0, 0, out.width() as i32, out.height() as i32);
+    match crop.and_then(|c| c.intersect(&whole)) {
+        Some(c) if c != whole => imaging::crop(&out, c).map_err(|e| anyhow!("{e}")),
+        _ => Ok(out),
     }
-    Rgba::from_raw(img.width(), img.height(), rgba)
-        .ok_or_else(|| anyhow!("rendered buffer had the wrong size"))
 }
 
 /// Where an annotated copy goes: the original's folder and `<stem>_annotated.<ext>`, which
@@ -1237,23 +1281,24 @@ fn finish_typing(ctx: &mut Ctx) {
 
 fn save(hwnd: HWND, ctx: &mut Ctx) {
     finish_typing(ctx);
-    if ctx.editor.items().is_empty() {
+    if ctx.editor.doc().is_empty() {
         set_status(hwnd, ctx, "nothing to save yet");
         return;
     }
     let quality = crate::dispatch::with_app(|a| a.settings.screenshot.jpeg_quality).unwrap_or(90);
-    let result = render(&ctx.image, ctx.editor.items()).and_then(|img| {
+    let result = export(&ctx.image, ctx.editor.items(), ctx.editor.crop()).and_then(|img| {
         let (dir, name) = annotated_target(&ctx.source);
         imaging::save_image_unique(&img, &dir, &name, quality).map_err(|e| anyhow!("{e}"))
     });
     match result {
         Ok(path) => {
-            ctx.saved = ctx.editor.items().to_vec();
+            ctx.saved = ctx.editor.doc();
             let name = path
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_default();
             tracing::info!("saved annotated screenshot to {}", path.display());
+            crate::history::record(&path, config::history::EntryKind::Annotated);
             set_status(hwnd, ctx, &format!("saved as {name}"));
         }
         Err(e) => {
@@ -1265,8 +1310,8 @@ fn save(hwnd: HWND, ctx: &mut Ctx) {
 
 fn copy(hwnd: HWND, ctx: &mut Ctx) {
     finish_typing(ctx);
-    let result =
-        render(&ctx.image, ctx.editor.items()).and_then(|img| crate::clipboard::copy_image(&img));
+    let result = export(&ctx.image, ctx.editor.items(), ctx.editor.crop())
+        .and_then(|img| crate::clipboard::copy_image(&img));
     match result {
         Ok(()) => set_status(hwnd, ctx, "copied to clipboard"),
         Err(e) => {
@@ -1703,6 +1748,46 @@ mod tests {
         );
         let dark = count_near(&out, 40, 40, 8, |p| p[0] < 80 && p[1] < 80 && p[2] < 80);
         assert!(dark > 8, "black digit pixels in the middle: {dark}");
+    }
+
+    #[test]
+    fn export_cuts_to_the_crop_after_drawing() {
+        // An outline straddling the crop edge: the kept part of it is still drawn.
+        let items = [Item::Rect(Rect::new(10, 10, 40, 30), Style::DEFAULT)];
+        let out = export(&white(100, 80), &items, Some(Rect::new(20, 5, 50, 40))).unwrap();
+        assert_eq!((out.width(), out.height()), (50, 40));
+        // (x, y) in the crop is (x + 20, y + 5) in the image: the outline's top edge at y 10..13.
+        assert_eq!(
+            px(&out, 10, 6),
+            [255, 0, 0, 255],
+            "top edge, inside the crop"
+        );
+        assert_eq!(
+            px(&out, 10, 15),
+            [255, 255, 255, 255],
+            "inside the rectangle"
+        );
+        assert_eq!(
+            px(&out, 45, 2),
+            [255, 255, 255, 255],
+            "right of the rectangle"
+        );
+    }
+
+    #[test]
+    fn export_without_a_useful_crop_keeps_the_whole_image() {
+        let src = white(30, 20);
+        for crop in [
+            None,
+            Some(Rect::new(0, 0, 30, 20)),
+            Some(Rect::new(50, 50, 5, 5)),
+        ] {
+            let out = export(&src, &[], crop).unwrap();
+            assert_eq!((out.width(), out.height()), (30, 20), "{crop:?}");
+        }
+        // Hanging over an edge: clamped to the image.
+        let out = export(&src, &[], Some(Rect::new(20, 10, 50, 50))).unwrap();
+        assert_eq!((out.width(), out.height()), (10, 10));
     }
 
     #[test]

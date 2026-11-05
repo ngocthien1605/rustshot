@@ -1,5 +1,6 @@
 //! The post-capture flyout: a small, non-modal, top-most window in the bottom-right corner
-//! showing a thumbnail of the shot and six actions (Annotate, Open, Folder, Copy, Path, Delete). It
+//! showing a thumbnail of the shot and seven actions (Annotate, Pin, Open, Folder, Copy, Path,
+//! Delete). It
 //! auto-dismisses after a few seconds. Button clicks post [`Action`]s to the dispatch window,
 //! which calls back into the [`Flyout`] methods — keeping all state on the UI thread.
 
@@ -49,6 +50,7 @@ const ID_COPY: usize = 103;
 const ID_PATH: usize = 104;
 const ID_DELETE: usize = 105;
 const ID_ANNOTATE: usize = 106;
+const ID_PIN: usize = 107;
 
 /// Heap-stable inner state, pointed to by the window's `GWLP_USERDATA` and owned by [`Flyout`].
 struct FlyoutInner {
@@ -220,6 +222,7 @@ fn create_buttons(
 ) -> Result<()> {
     let labels = [
         (ID_ANNOTATE, w!("Annotate")),
+        (ID_PIN, w!("Pin")),
         (ID_OPEN, w!("Open")),
         (ID_FOLDER, w!("Folder")),
         (ID_COPY, w!("Copy")),
@@ -227,7 +230,8 @@ fn create_buttons(
         (ID_DELETE, w!("Delete")),
     ];
     let px = |v: i32| crate::platform::dpi::scale(v, dpi);
-    let (bw, bh, gap, x0, y) = (px(76), px(28), px(4), px(12), px(WIN_H - 40));
+    // Seven buttons: 12 + 7 × 64 + 6 × 4 = 484 of the 500-px width.
+    let (bw, bh, gap, x0, y) = (px(64), px(28), px(4), px(12), px(WIN_H - 40));
     // SAFETY: standard BUTTON child-window creation.
     unsafe {
         let hinstance = GetModuleHandleW(None).context("GetModuleHandleW")?;
@@ -295,6 +299,7 @@ unsafe fn wndproc_inner(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) ->
             let id = wparam.0 & 0xFFFF;
             let action = match id {
                 ID_ANNOTATE => Some(Action::FlyoutAnnotate),
+                ID_PIN => Some(Action::FlyoutPin),
                 ID_OPEN => Some(Action::FlyoutOpen),
                 ID_FOLDER => Some(Action::FlyoutOpenFolder),
                 ID_COPY => Some(Action::FlyoutCopy),

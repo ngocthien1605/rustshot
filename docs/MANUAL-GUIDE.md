@@ -16,8 +16,9 @@ RustShot is a small Windows app that lives in the system tray (the icons next to
 has no main window. It does two things:
 
 - **Screenshots**: a region you drag, one window, one monitor, or every monitor at once —
-  then mark them up with rectangles, text, arrows, numbered steps and a highlighter, or
-  pixelate or black out what others must not see.
+  then mark them up with rectangles, text, arrows, numbered steps and a highlighter, crop
+  them, pixelate or black out what others must not see, or pin them on top of your screen.
+  **History…** finds earlier captures again.
 - **Screen recordings**: a region or window recorded to **MP4** video (optionally with
   microphone and computer sound), or to an animated **GIF**.
 
@@ -68,6 +69,7 @@ Click the tray icon (left or right button):
 | **Screenshot ▸ Screenshot — All monitors** | Capture every monitor as one image. |
 | **Record ▸ Record video (region/window)** | Record a region or window to MP4. |
 | **Record ▸ Record GIF (region/window)** | Record a region or window to an animated GIF. |
+| **History…** | List your recent captures and recordings ([§5](#find-an-earlier-capture-history)). |
 | **Open output folder** | Open the folder your captures are saved in. |
 | **Settings…** | Open the Settings window ([§9](#9-settings)). |
 | **Quit RustShot** | Exit. A recording in progress is stopped and saved first. |
@@ -105,6 +107,7 @@ desktop across all monitors.
 | Button | Action |
 |---|---|
 | **Annotate** | Open the image in the editor ([§6](#6-annotate-a-screenshot)). |
+| **Pin** | Keep the image on top of everything, as a small window ([below](#pin-a-screenshot-to-the-screen)). |
 | **Open** | Open it in your default image viewer. |
 | **Folder** | Open Explorer with the file selected. |
 | **Copy** | Copy the image to the clipboard again. |
@@ -114,6 +117,40 @@ desktop across all monitors.
 **Delayed screenshot.** To capture a menu or tooltip that closes when you press a key, set
 `delay_seconds` in `config.toml` (0–60, see [§11](#11-advanced-editing-configtoml)). RustShot
 then waits that many seconds before capturing. Nothing is shown while it waits.
+
+### Pin a screenshot to the screen
+
+Click **Pin** in the preview panel (or in the History window) to show the screenshot in a small
+window that stays on top of all other windows — handy for copying values from one screen into
+another form, or keeping instructions in view.
+
+- It opens at the size it was captured (100 %), or smaller if it would not fit on the screen.
+- **Drag** it anywhere to move it. **Mouse wheel**: zoom in or out (10 %–400 %) around the
+  pointer.
+- **Right-click**: **Copy**, **Actual size (100 %)**, **Close**. `Ctrl+C` copies it too.
+- **Double-click** or `Esc` closes it. You can pin several screenshots at once.
+
+A pinned screenshot is a copy: deleting the file does not close it, and closing it does not
+change the file.
+
+### Find an earlier capture: History
+
+Tray → **History…** lists what RustShot saved — screenshots, annotated copies and recordings,
+newest first, with the time and the file name. Click one to see a preview, its full path and its
+size, then:
+
+| Button | Action |
+|---|---|
+| **Open** (or double-click) | Open it in its default app (image viewer, video player). |
+| **Annotate** / **Pin** / **Copy** | As in the preview panel (pictures only). |
+| **Folder** | Open Explorer with the file selected. |
+| **Remove** | Take it off the list. The file stays where it is. |
+| **Delete file…** | Delete the file from disk, after asking. It does **not** go to the Recycle Bin. |
+| **Clear list…** | Empty the list, after asking. The files stay where they are. |
+
+Files you moved or deleted outside RustShot drop off the list the next time it opens. The list
+keeps the newest 100 entries; to change that, or to stop keeping a history, see
+[§11](#11-advanced-editing-configtoml).
 
 ## 6. Annotate a screenshot
 
@@ -135,6 +172,9 @@ then waits that many seconds before capturing. Nothing is shown while it waits.
      that" instructions. The marker appears where you release the mouse button, so you can drag
      to aim it. The colour fills the circle (the number is white, or black on yellow and white);
      the line setting chooses its size.
+   - **Crop** (`C`): drag over the part of the screenshot you want to keep. The rest is shaded
+     and is cut off when you **Save** or **Copy**. Drag again to change it; a single click with
+     Crop removes it. Undo works on crops too. The original screenshot is not changed.
 3. **Change what you drew: Select** (`S`). Click a mark to select it — a dotted frame appears
    around it. Then:
    - **drag** it to move it (it stays inside the picture);
@@ -293,7 +333,7 @@ Settings tells you if a new one is taken too. The tray menu always works.
 
 | Action | Keys |
 |---|---|
-| Select / Rectangle / Text / Arrow tool | `S` / `R` / `T` / `A` |
+| Select / Crop / Rectangle / Text / Arrow tool | `S` / `C` / `R` / `T` / `A` |
 | Highlight / Pixelate / Black box / Step tool | `H` / `P` / `B` / `N` |
 | Delete the selected mark | `Delete` |
 | Colour red, yellow, green, blue, black, white | `1` … `6` |
@@ -318,6 +358,8 @@ Some options exist only in `%APPDATA%\RustShot\config.toml`:
 | `recording.gif_max_width` | `800` | Longer side of a GIF, in pixels (16–7680). |
 | `recording.gif_fps` | `15` | GIF frames per second (1–50). |
 | `recording.gif_max_seconds` | `30` | GIF length limit (1–600 s). |
+| `history.enabled` | `true` | Keep the list of captures shown by **History…**. |
+| `history.max_entries` | `100` | How many captures the list keeps (10–1000). |
 
 To edit it safely:
 
@@ -336,6 +378,7 @@ you. Every key is listed in the [User Guide](USER-GUIDE.md#configtoml-keys).
 |---|---|
 | Screenshots and recordings | `Pictures\RustShot` (or the folder chosen in Settings) |
 | Settings | `%APPDATA%\RustShot\config.toml` |
+| Capture history | `%APPDATA%\RustShot\history.toml` |
 | Logs (the newest 14 days) | `%APPDATA%\RustShot\logs\rustshot.log.YYYY-MM-DD` (dates in UTC) |
 | Crash details, if any | `%APPDATA%\RustShot\logs\panic.log` |
 | Start-at-sign-in entry | Registry `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`, value `RustShot` |

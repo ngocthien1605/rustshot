@@ -131,6 +131,9 @@ impl Style {
 pub enum Tool {
     /// Click an annotation to select it; drag to move it, `Delete` to remove it.
     Select,
+    /// Drag the part of the screenshot to keep; Save and Copy cut the rest off. A click (no drag)
+    /// removes the crop.
+    Crop,
     /// Draw a rectangle outline.
     Rect,
     /// Draw a rectangle, then type text inside it.
@@ -149,8 +152,9 @@ pub enum Tool {
 }
 
 impl Tool {
-    pub const ALL: [Tool; 8] = [
+    pub const ALL: [Tool; 9] = [
         Tool::Select,
+        Tool::Crop,
         Tool::Rect,
         Tool::Text,
         Tool::Arrow,
@@ -163,13 +167,14 @@ impl Tool {
     fn index(self) -> usize {
         match self {
             Tool::Select => 0,
-            Tool::Rect => 1,
-            Tool::Text => 2,
-            Tool::Arrow => 3,
-            Tool::Highlight => 4,
-            Tool::Pixelate => 5,
-            Tool::BlackBox => 6,
-            Tool::Step => 7,
+            Tool::Crop => 1,
+            Tool::Rect => 2,
+            Tool::Text => 3,
+            Tool::Arrow => 4,
+            Tool::Highlight => 5,
+            Tool::Pixelate => 6,
+            Tool::BlackBox => 7,
+            Tool::Step => 8,
         }
     }
 
@@ -187,7 +192,10 @@ impl Tool {
     /// Whether the palette applies (a pixelate area has no colour; a black box is always black).
     /// For Select it depends on the selected item: see [`Editor::color_enabled`].
     pub fn uses_color(self) -> bool {
-        !matches!(self, Tool::Select | Tool::Pixelate | Tool::BlackBox)
+        !matches!(
+            self,
+            Tool::Select | Tool::Crop | Tool::Pixelate | Tool::BlackBox
+        )
     }
 
     /// Whether the thickness applies (highlight, pixelate and black box are filled areas; for a
@@ -398,12 +406,13 @@ pub enum Shortcut {
     Thicker,
 }
 
-/// The shortcut for a typed character: `S` `R` `T` `A` `H` `P` `B` `N` pick a tool, `1`–`6` a colour,
+/// The shortcut for a typed character: `S` `C` `R` `T` `A` `H` `P` `B` `N` pick a tool, `1`–`6` a colour,
 /// `[` / `]` step the thickness. Case-insensitive. Characters (not key codes) are matched, so
 /// the keys work the same on any keyboard layout.
 pub fn shortcut(c: char) -> Option<Shortcut> {
     Some(match c.to_ascii_lowercase() {
         's' => Shortcut::Tool(Tool::Select),
+        'c' => Shortcut::Tool(Tool::Crop),
         'r' => Shortcut::Tool(Tool::Rect),
         't' => Shortcut::Tool(Tool::Text),
         'a' => Shortcut::Tool(Tool::Arrow),
@@ -438,6 +447,23 @@ pub enum EscapeResult {
     Nothing,
 }
 
+/// Everything the user has made of the screenshot: the annotations and the crop. One undo step
+/// restores one of these; the window compares it with the last saved one to know about unsaved
+/// work.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Doc {
+    pub items: Vec<Item>,
+    /// The part of the image to keep (image px), or `None` for all of it.
+    pub crop: Option<Rect>,
+}
+
+impl Doc {
+    /// Nothing drawn and nothing cropped: there is nothing to save.
+    pub fn is_empty(&self) -> bool {
+        self.items.is_empty() && self.crop.is_none()
+    }
+}
+
 /// A selected item being dragged to a new place.
 #[derive(Debug)]
 struct Moving {
@@ -456,11 +482,12 @@ pub struct Editor {
     height: i32,
     tool: Tool,
     items: Vec<Item>,
+    crop: Option<Rect>,
     /// Earlier states of `items`, most recent last: every change (draw, move, delete, restyle)
     /// records the state before it.
-    undo: Vec<Vec<Item>>,
+    undo: Vec<Doc>,
     /// States taken back by undo, most recent last; cleared by any new change.
-    redo: Vec<Vec<Item>>,
+    redo: Vec<Doc>,
     drag: Option<(Point, Point)>,
     typing: Option<Typing>,
     /// Index into `items` of the selected item (Select tool).
@@ -479,6 +506,7 @@ impl Editor {
             height,
             tool: Tool::Rect,
             items: Vec::new(),
+            crop: None,
             undo: Vec::new(),
             redo: Vec::new(),
             drag: None,
@@ -500,6 +528,27 @@ impl Editor {
 
     pub fn typing(&self) -> Option<&Typing> {
         self.typing.as_ref()
+    }
+
+    /// The part of the image Save and Copy keep, if cropped.
+    pub fn crop(&self) -> Option<Rect> {
+        self.crop
+    }
+
+    /// The crop to show: the one being dragged with the Crop tool, else the current one.
+    pub fn shown_crop(&self) -> Option<Rect> {
+        match (self.tool, self.drag) {
+            (Tool::Crop, Some((a, b))) => Some(self.crop_rect(a, b)),
+            _ => self.crop,
+        }
+    }
+
+    /// A copy of the annotations and crop (what an undo step or a save holds).
+    pub fn doc(&self) -> Doc {
+        Doc {
+            items: self.items.clone(),
+            crop: self.crop,
+        }
     }
 
     pub fn is_typing(&self) -> bool {
@@ -619,7 +668,7 @@ impl Editor {
         let r = self.normalized(a, b);
         let style = self.styles[self.tool.index()];
         Some(match self.tool {
-            Tool::Select => return None,
+            Tool::Select | Tool::Crop => return None,
             Tool::Rect | Tool::Text => Item::Rect(r, style),
             Tool::Arrow => Item::Arrow {
                 from: a,
@@ -739,7 +788,10 @@ impl Editor {
         self.on_move(p);
         if let Some(m) = self.moving.take() {
             if m.before != self.items {
-                self.undo.push(m.before);
+                self.undo.push(Doc {
+                    items: m.before,
+                    crop: self.crop,
+                });
                 self.redo.clear();
             }
             return;
@@ -747,6 +799,16 @@ impl Editor {
         let Some((a, b)) = self.drag.take() else {
             return;
         };
+        if self.tool == Tool::Crop {
+            // A real drag sets the crop; a click (an accidental-size drag) removes it.
+            let r = self.normalized(a, b);
+            let crop = (r.width >= MIN_SIZE && r.height >= MIN_SIZE).then(|| self.crop_rect(a, b));
+            if crop != self.crop {
+                self.record();
+                self.crop = crop;
+            }
+            return;
+        }
         let style = self.styles[self.tool.index()];
         if self.tool == Tool::Step {
             // Placed where the button is released, whatever the drag in between.
@@ -777,7 +839,7 @@ impl Editor {
             Tool::Highlight => self.push(Item::Highlight(r, style.color)),
             Tool::Pixelate => self.push(Item::Pixelate(r)),
             Tool::BlackBox => self.push(Item::BlackBox(r)),
-            Tool::Arrow | Tool::Select | Tool::Step => {} // handled above
+            Tool::Arrow | Tool::Select | Tool::Step | Tool::Crop => {} // handled above
             Tool::Text => {
                 self.typing = Some(Typing {
                     rect: r,
@@ -856,8 +918,8 @@ impl Editor {
         }
         match self.undo.pop() {
             Some(before) => {
-                self.redo.push(std::mem::replace(&mut self.items, before));
-                self.selected = None;
+                let now = self.restore(before);
+                self.redo.push(now);
                 true
             }
             None => false,
@@ -873,8 +935,8 @@ impl Editor {
         }
         match self.redo.pop() {
             Some(after) => {
-                self.undo.push(std::mem::replace(&mut self.items, after));
-                self.selected = None;
+                let now = self.restore(after);
+                self.undo.push(now);
                 true
             }
             None => false,
@@ -901,9 +963,19 @@ impl Editor {
         }
     }
 
-    /// Remember the current items before a change; a new change drops the redo list.
+    /// Go back (or forward) to `doc`, returning the state it replaces. Clears the selection: the
+    /// selected index may not mean the same item any more.
+    fn restore(&mut self, doc: Doc) -> Doc {
+        self.selected = None;
+        Doc {
+            items: std::mem::replace(&mut self.items, doc.items),
+            crop: std::mem::replace(&mut self.crop, doc.crop),
+        }
+    }
+
+    /// Remember the current state before a change; a new change drops the redo list.
     fn record(&mut self) {
-        self.undo.push(self.items.clone());
+        self.undo.push(self.doc());
         self.redo.clear();
     }
 
@@ -930,6 +1002,13 @@ impl Editor {
             p.x.clamp(0, (self.width - 1).max(0)),
             p.y.clamp(0, (self.height - 1).max(0)),
         )
+    }
+
+    /// The crop for a drag from `a` to `b`: both corner pixels included, so a drag from corner
+    /// to corner of the image keeps all of it (corners are clamped to the last pixel).
+    fn crop_rect(&self, a: Point, b: Point) -> Rect {
+        let r = self.normalized(a, b);
+        Rect::new(r.x, r.y, r.width + 1, r.height + 1)
     }
 
     fn normalized(&self, a: Point, b: Point) -> Rect {
@@ -1651,9 +1730,12 @@ mod tests {
     fn which_tools_use_colour_and_thickness() {
         // Select has no style of its own: it shows the selected item's (tested separately).
         for tool in Tool::ALL.into_iter().filter(|t| *t != Tool::Select) {
-            let filled = matches!(tool, Tool::Highlight | Tool::Pixelate | Tool::BlackBox);
-            assert_eq!(tool.uses_thickness(), !filled, "{tool:?}");
-            let colourless = matches!(tool, Tool::Pixelate | Tool::BlackBox);
+            let lineless = matches!(
+                tool,
+                Tool::Crop | Tool::Highlight | Tool::Pixelate | Tool::BlackBox
+            );
+            assert_eq!(tool.uses_thickness(), !lineless, "{tool:?}");
+            let colourless = matches!(tool, Tool::Crop | Tool::Pixelate | Tool::BlackBox);
             assert_eq!(tool.uses_color(), !colourless, "{tool:?}");
         }
     }
@@ -2357,5 +2439,95 @@ mod tests {
         assert_eq!(Color::White.contrast(), Color::Black);
         let sizes: Vec<i32> = Thickness::ALL.iter().map(|t| t.step_diameter()).collect();
         assert!(sizes.windows(2).all(|w| w[0] < w[1]), "{sizes:?}");
+    }
+
+    #[test]
+    fn crop_keeps_the_dragged_area_including_both_corner_pixels() {
+        let mut e = Editor::new(200, 100);
+        assert!(e.apply_shortcut(shortcut('c').unwrap()));
+        assert_eq!(e.tool(), Tool::Crop);
+        assert!(!e.color_enabled() && !e.thickness_enabled());
+        e.on_down(Point::new(150, 80));
+        e.on_move(Point::new(20, 10));
+        assert_eq!(
+            e.shown_crop(),
+            Some(Rect::new(20, 10, 131, 71)),
+            "live while dragging"
+        );
+        assert_eq!(e.crop(), None, "not applied until release");
+        assert_eq!(e.preview(), None, "no shape is drawn");
+        e.on_up(Point::new(20, 10));
+        assert_eq!(e.crop(), Some(Rect::new(20, 10, 131, 71)));
+        assert!(e.items().is_empty(), "a crop is not an annotation");
+        assert!(!e.doc().is_empty());
+    }
+
+    #[test]
+    fn a_corner_to_corner_crop_keeps_the_whole_image() {
+        let mut e = Editor::new(200, 100);
+        e.set_tool(Tool::Crop);
+        drag(&mut e, (-50, -50), (900, 900));
+        assert_eq!(e.crop(), Some(Rect::new(0, 0, 200, 100)));
+    }
+
+    #[test]
+    fn a_click_with_the_crop_tool_removes_the_crop_and_undo_brings_it_back() {
+        let mut e = Editor::new(200, 100);
+        e.set_tool(Tool::Crop);
+        drag(&mut e, (10, 10), (100, 60));
+        let kept = e.crop();
+        click(&mut e, 50, 50);
+        assert_eq!(e.crop(), None);
+        assert!(e.undo());
+        assert_eq!(e.crop(), kept);
+        assert!(e.undo());
+        assert_eq!(e.crop(), None);
+        assert!(!e.undo(), "two changes, two steps");
+        assert!(e.redo() && e.redo());
+        assert_eq!(e.crop(), None, "redo replays both");
+        click(&mut e, 5, 5); // no crop to remove: nothing recorded
+        assert!(e.undo());
+        assert_eq!(e.crop(), kept);
+    }
+
+    #[test]
+    fn undo_restores_items_and_crop_together_in_order() {
+        let mut e = Editor::new(200, 100);
+        drag(&mut e, (10, 10), (50, 50)); // a rectangle
+        e.set_tool(Tool::Crop);
+        drag(&mut e, (0, 0), (120, 80)); // then a crop
+        e.set_tool(Tool::Rect);
+        drag(&mut e, (60, 10), (100, 50)); // then another rectangle
+        assert_eq!((e.items().len(), e.crop().is_some()), (2, true));
+        e.undo();
+        assert_eq!((e.items().len(), e.crop().is_some()), (1, true));
+        e.undo();
+        assert_eq!((e.items().len(), e.crop().is_some()), (1, false));
+        e.redo();
+        assert_eq!((e.items().len(), e.crop().is_some()), (1, true));
+    }
+
+    #[test]
+    fn moving_an_item_keeps_the_crop_in_its_undo_step() {
+        let mut e = Editor::new(200, 100);
+        drag(&mut e, (10, 10), (50, 50));
+        e.set_tool(Tool::Crop);
+        drag(&mut e, (0, 0), (120, 80));
+        e.set_tool(Tool::Select);
+        e.on_down(Point::new(11, 30));
+        e.on_up(Point::new(31, 30));
+        e.undo(); // the move only
+        assert_eq!(e.items()[0].bounds(), Rect::new(10, 10, 40, 40));
+        assert!(e.crop().is_some());
+    }
+
+    #[test]
+    fn doc_is_empty_only_without_items_and_crop() {
+        assert!(Doc::default().is_empty());
+        let mut e = Editor::new(50, 50);
+        e.set_tool(Tool::Crop);
+        drag(&mut e, (5, 5), (40, 40));
+        assert!(!e.doc().is_empty());
+        assert_eq!(e.doc().crop, e.crop());
     }
 }

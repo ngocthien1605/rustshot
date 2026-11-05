@@ -143,6 +143,33 @@ below is still to be tried by hand.
 - [ ] **Large screenshot** (4K / all monitors): moving a black box or highlight is smooth while
       dragging (the image is rebuilt once at the start and once at the end).
 
+## Crop, Pin to screen, History
+
+Pure logic is tested (crop in the editor model, pin geometry, the history list in `config`), and
+the export crop runs in the render tests on CI; the windows below are still to be tried by hand.
+
+- [ ] **Crop** (`C`): the editor toolbar shows Crop after Select and still fits. Drag → outside
+      shaded and the kept part framed, live while dragging. Save → the `_annotated` file has
+      exactly the kept size (Explorer → Properties → Details). Copy → paste in Paint: same size.
+      Annotations crossing the edge are cut, not moved. Click with Crop → crop removed. Undo /
+      Redo step through crops. A crop alone (no marks) makes Save work and Close ask to save.
+- [ ] **Pin**: flyout shows seven buttons (Annotate, Pin, Open, Folder, Copy, Path, Delete), all
+      readable at 100 % and 150 %. Pin → the flyout closes, a framed window appears centred on the
+      monitor under the pointer, at 100 % for a small capture (compare with the original). A 4K
+      capture on a 1080p screen opens smaller. Drag moves it; wheel zooms around the pointer;
+      right-click menu Copy / Actual size / Close works and closes when clicking elsewhere;
+      double-click and `Esc` close; `Ctrl+C` copies full size. Two pins at once; it stays above
+      other windows, has no taskbar button; delete the file: the pin stays.
+- [ ] **History**: tray → History… opens one window (again → the same window comes to the front).
+      After a screenshot, an annotated save, an MP4 and a GIF, all four are listed newest first
+      with the right kind, and the open window updated by itself. Preview + path + size for
+      pictures; for a video a note instead, and Annotate / Pin / Copy greyed. Open,
+      double-click, Folder, Annotate, Pin, Copy each do what they say. Remove → gone from the
+      list, file still there. Delete file… → asks; No keeps it; Yes deletes it (not in the
+      Recycle Bin) and removes the entry. Clear list… → asks, empties, files kept. Delete a file
+      in Explorer, reopen History → its entry is gone. `history.enabled = false` → nothing new is
+      recorded. Arrow keys move through the list after the window opens.
+
 ## M3 — Recording (MP4, video-only)
 - [ ] Countdown → compact always-on-top toolbar (elapsed + Pause/Stop) → Stop finalises.
 - [ ] 60 s 1080p30 monitor recording plays correctly in VLC and Windows Media Player.

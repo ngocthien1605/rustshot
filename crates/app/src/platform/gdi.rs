@@ -141,6 +141,32 @@ impl Drop for Surface {
     }
 }
 
+/// `img` as a DIB-backed memory DC (top-down BGRA, opaque), for fast blits.
+pub(crate) fn surface_from_rgba(img: &imaging::Rgba) -> Result<Surface> {
+    let screen = ScreenDc::get()?;
+    let mut surface = Surface::dib(screen.0, img.width() as i32, img.height() as i32)?;
+    let dst = surface
+        .pixels_mut()
+        .ok_or_else(|| anyhow::anyhow!("CreateDIBSection returned no pixel buffer"))?;
+    let (dst_px, _) = dst.as_chunks_mut::<4>();
+    let (src_px, _) = img.as_raw().as_chunks::<4>();
+    for (d, s) in dst_px.iter_mut().zip(src_px) {
+        *d = [s[2], s[1], s[0], 255];
+    }
+    Ok(surface)
+}
+
+/// The pixels of a `w`×`h` DIB surface as an opaque RGBA image (call `GdiFlush` first if GDI
+/// drew into it). `None` for a surface without pixels or of another size.
+pub(crate) fn rgba_from_surface(surface: &Surface, w: u32, h: u32) -> Option<imaging::Rgba> {
+    let src = surface.pixels()?;
+    let mut rgba = Vec::with_capacity(src.len());
+    for p in src.as_chunks::<4>().0 {
+        rgba.extend_from_slice(&[p[2], p[1], p[0], 255]);
+    }
+    imaging::Rgba::from_raw(w, h, rgba)
+}
+
 /// Copy `f` into a tightly packed BGRA buffer `row` bytes wide, clipping to whichever is
 /// smaller. Uncovered parts of `dst` are left as they are.
 pub(crate) fn copy_frame(f: &Frame, dst: &mut [u8], row: usize) {
@@ -189,6 +215,19 @@ mod tests {
         let mut dst = vec![0u8; 2 * 4 * 2];
         copy_frame(&frame(5, 5, 5 * 4, 9), &mut dst, 2 * 4);
         assert!(dst.iter().all(|&b| b == 9));
+    }
+
+    #[test]
+    fn rgba_survives_a_round_trip_through_a_surface() {
+        let img = imaging::Rgba::from_raw(3, 2, (0..24).map(|v| v as u8 * 10).collect()).unwrap();
+        let s = surface_from_rgba(&img).unwrap();
+        let back = rgba_from_surface(&s, 3, 2).unwrap();
+        // Same colours; alpha is forced opaque on the way in.
+        for (a, b) in img.pixels().zip(back.pixels()) {
+            assert_eq!(a.0[..3], b.0[..3]);
+            assert_eq!(b.0[3], 255);
+        }
+        assert!(rgba_from_surface(&s, 4, 4).is_none(), "wrong size");
     }
 
     #[test]

@@ -174,6 +174,10 @@ pub fn stop() {
     let Recording { handle, toolbar } = rec;
     drop(toolbar);
     let (result, notes) = handle.finish();
+    // A file that ended early is saved and playable too: both go into the history.
+    if let Ok(path) | Err(recorder::RecorderError::EndedEarly { path, .. }) = &result {
+        crate::history::record(path, config::history::EntryKind::for_recording(path));
+    }
     let sound = sound_notes(&notes);
     match result {
         Ok(path) if notes.is_empty() => tracing::info!("recording saved to {}", path.display()),
