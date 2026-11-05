@@ -24,9 +24,9 @@ use windows::Win32::Graphics::Gdi::{
     DrawFocusRect, DrawTextW, EndPaint, FillRect, FrameRect, GdiFlush, GetStockObject, GetSysColor,
     GetSysColorBrush, IntersectClipRect, InvalidateRect, LineTo, MoveToEx, Polygon, Rectangle,
     RestoreDC, SaveDC, SelectObject, SetBkMode, SetStretchBltMode, SetTextColor, StretchBlt,
-    AC_SRC_OVER, BLENDFUNCTION, CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, COLOR_BTNFACE,
-    COLOR_BTNTEXT, COLOR_GRAYTEXT, DEFAULT_CHARSET, DT_NOPREFIX, DT_WORDBREAK, HALFTONE, HDC,
-    HGDIOBJ, HOLLOW_BRUSH, OUT_DEFAULT_PRECIS, PAINTSTRUCT, PS_INSIDEFRAME, PS_SOLID, SRCCOPY,
+    AC_SRC_OVER, BLACK_BRUSH, BLENDFUNCTION, CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, COLOR_BTNFACE,
+    COLOR_BTNTEXT, COLOR_GRAYTEXT, DEFAULT_CHARSET, DT_NOPREFIX, DT_WORDBREAK, HALFTONE, HBRUSH,
+    HDC, HGDIOBJ, HOLLOW_BRUSH, OUT_DEFAULT_PRECIS, PAINTSTRUCT, PS_INSIDEFRAME, PS_SOLID, SRCCOPY,
     TRANSPARENT,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
@@ -46,6 +46,14 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WM_SIZE, WM_SYSKEYDOWN, WNDCLASSW, WS_CHILD, WS_OVERLAPPEDWINDOW, WS_VISIBLE,
 };
 
+use windows::Win32::Graphics::Gdi::{
+    Ellipse, ScreenToClient, DT_CENTER, DT_SINGLELINE, DT_VCENTER,
+};
+use windows::Win32::UI::Input::KeyboardAndMouse::VK_DELETE;
+use windows::Win32::UI::WindowsAndMessaging::{
+    GetCursorPos, SetCursor, HTCLIENT, IDC_ARROW, IDC_SIZEALL, WM_SETCURSOR,
+};
+
 use crate::platform::gdi::{ScreenDc, Surface};
 
 use super::model::{
@@ -59,36 +67,56 @@ static REGISTER: Once = Once::new();
 /// Toolbar height and canvas margin at 96 DPI; scaled by the window's DPI (see `dpi`).
 const TOOLBAR_H: i32 = 40;
 const MARGIN: i32 = 8;
-/// The narrowest client area that shows the whole toolbar, at 96 DPI.
-const TOOLBAR_W: i32 = 854;
-/// Toolbar buttons: id, label, x, width, extra style — all lengths at 96 DPI. The tool buttons
-/// are radio buttons (their ids must stay consecutive, in [`Tool::ALL`] order); the swatches and
-/// thickness buttons are owner-drawn (`WM_DRAWITEM`), their labels only name them for screen
-/// readers.
-const BUTTONS: [(i32, PCWSTR, i32, i32, u32); 18] = [
-    (ID_RECT, w!("Rectangle"), 8, 76, TOOL | WS_GROUP),
-    (ID_RECT + 1, w!("Text"), 88, 46, TOOL),
-    (ID_RECT + 2, w!("Arrow"), 138, 52, TOOL),
-    (ID_RECT + 3, w!("Highlight"), 194, 68, TOOL),
-    (ID_RECT + 4, w!("Pixelate"), 266, 64, TOOL),
-    (ID_COLOR0, w!("Red"), 342, 26, BS_OWNERDRAW),
-    (ID_COLOR0 + 1, w!("Yellow"), 370, 26, BS_OWNERDRAW),
-    (ID_COLOR0 + 2, w!("Green"), 398, 26, BS_OWNERDRAW),
-    (ID_COLOR0 + 3, w!("Blue"), 426, 26, BS_OWNERDRAW),
-    (ID_COLOR0 + 4, w!("Black"), 454, 26, BS_OWNERDRAW),
-    (ID_COLOR0 + 5, w!("White"), 482, 26, BS_OWNERDRAW),
-    (ID_WIDTH0, w!("Thin"), 520, 30, BS_OWNERDRAW),
-    (ID_WIDTH0 + 1, w!("Medium"), 552, 30, BS_OWNERDRAW),
-    (ID_WIDTH0 + 2, w!("Thick"), 584, 30, BS_OWNERDRAW),
-    (ID_UNDO, w!("Undo"), 626, 52, 0),
-    (ID_REDO, w!("Redo"), 682, 52, 0),
-    (ID_SAVE, w!("Save"), 738, 52, 0),
-    (ID_COPY, w!("Copy"), 794, 52, 0),
+/// How far (screen px at 96 DPI) a click may miss an annotation and still select it.
+const HIT_SLOP: i32 = 5;
+/// Toolbar buttons: id, label, gap before the button, width, extra style — lengths at 96 DPI;
+/// each button's x is the running sum ([`button_x`]). The tool buttons are radio buttons (their
+/// ids must stay consecutive, in [`Tool::ALL`] order); the swatches and thickness buttons are
+/// owner-drawn (`WM_DRAWITEM`), their labels only name them for screen readers.
+const BUTTONS: [(i32, PCWSTR, i32, i32, u32); 21] = [
+    (ID_TOOL0, w!("Select"), 8, 50, TOOL | WS_GROUP),
+    (ID_TOOL0 + 1, w!("Rectangle"), 4, 72, TOOL),
+    (ID_TOOL0 + 2, w!("Text"), 4, 44, TOOL),
+    (ID_TOOL0 + 3, w!("Arrow"), 4, 50, TOOL),
+    (ID_TOOL0 + 4, w!("Highlight"), 4, 64, TOOL),
+    (ID_TOOL0 + 5, w!("Pixelate"), 4, 60, TOOL),
+    (ID_TOOL0 + 6, w!("Black box"), 4, 66, TOOL),
+    (ID_TOOL0 + 7, w!("Step"), 4, 44, TOOL),
+    (ID_COLOR0, w!("Red"), 12, 26, BS_OWNERDRAW),
+    (ID_COLOR0 + 1, w!("Yellow"), 2, 26, BS_OWNERDRAW),
+    (ID_COLOR0 + 2, w!("Green"), 2, 26, BS_OWNERDRAW),
+    (ID_COLOR0 + 3, w!("Blue"), 2, 26, BS_OWNERDRAW),
+    (ID_COLOR0 + 4, w!("Black"), 2, 26, BS_OWNERDRAW),
+    (ID_COLOR0 + 5, w!("White"), 2, 26, BS_OWNERDRAW),
+    (ID_WIDTH0, w!("Thin"), 12, 30, BS_OWNERDRAW),
+    (ID_WIDTH0 + 1, w!("Medium"), 2, 30, BS_OWNERDRAW),
+    (ID_WIDTH0 + 2, w!("Thick"), 2, 30, BS_OWNERDRAW),
+    (ID_UNDO, w!("Undo"), 12, 52, 0),
+    (ID_REDO, w!("Redo"), 4, 52, 0),
+    (ID_SAVE, w!("Save"), 4, 52, 0),
+    (ID_COPY, w!("Copy"), 4, 52, 0),
 ];
 
-/// First tool button; the five tools follow in [`Tool::ALL`] order.
-const ID_RECT: i32 = 201;
-const ID_TOOL_LAST: i32 = ID_RECT + Tool::ALL.len() as i32 - 1;
+/// Left edge of button `i` at 96 DPI: the gaps and widths of the buttons before it, plus its gap.
+const fn button_x(i: usize) -> i32 {
+    let mut x = 0;
+    let mut k = 0;
+    while k < i {
+        x += BUTTONS[k].2 + BUTTONS[k].3;
+        k += 1;
+    }
+    x + BUTTONS[i].2
+}
+
+/// The narrowest client area that shows the whole toolbar, at 96 DPI.
+const TOOLBAR_W: i32 = {
+    let last = BUTTONS.len() - 1;
+    button_x(last) + BUTTONS[last].3 + MARGIN
+};
+
+/// First tool button; the tools follow in [`Tool::ALL`] order.
+const ID_TOOL0: i32 = 201;
+const ID_TOOL_LAST: i32 = ID_TOOL0 + Tool::ALL.len() as i32 - 1;
 const ID_UNDO: i32 = 210;
 const ID_REDO: i32 = 211;
 const ID_SAVE: i32 = 212;
@@ -107,7 +135,7 @@ const TOOL: u32 = BS_PUSHLIKE | BS_RADIOBUTTON;
 
 /// The control id → what it selects.
 fn tool_of(id: i32) -> Option<Tool> {
-    Tool::ALL.get(usize::try_from(id - ID_RECT).ok()?).copied()
+    Tool::ALL.get(usize::try_from(id - ID_TOOL0).ok()?).copied()
 }
 fn color_of(id: i32) -> Option<Color> {
     Color::PALETTE
@@ -125,6 +153,8 @@ fn thickness_of(id: i32) -> Option<Thickness> {
 struct Shown {
     tool: Tool,
     style: Style,
+    colors: bool,
+    widths: bool,
     can_redo: bool,
 }
 
@@ -318,7 +348,7 @@ fn create_toolbar(parent: HWND) -> Result<()> {
             )
             .context("creating a toolbar button")?;
         }
-        let _ = CheckRadioButton(parent, ID_RECT, ID_TOOL_LAST, ID_RECT);
+        // The right tool button is pressed by `sync_toolbar` below.
     }
     set_dpi(parent, crate::platform::dpi::of_window(parent));
     if let Some(ctx) = ctx_of(parent) {
@@ -338,6 +368,8 @@ fn sync_toolbar(hwnd: HWND, ctx: &mut Ctx) {
     let now = Shown {
         tool: ctx.editor.tool(),
         style: ctx.editor.style(),
+        colors: ctx.editor.color_enabled(),
+        widths: ctx.editor.thickness_enabled(),
         can_redo: ctx.editor.can_redo(),
     };
     if ctx.shown == Some(now) {
@@ -352,15 +384,15 @@ fn show_toolbar(hwnd: HWND, now: Shown) {
     let tool_id = Tool::ALL
         .iter()
         .position(|t| *t == now.tool)
-        .map_or(ID_RECT, |i| ID_RECT + i as i32);
+        .map_or(ID_TOOL0, |i| ID_TOOL0 + i as i32);
     // SAFETY: checks, enables and invalidates our own child buttons.
     unsafe {
-        let _ = CheckRadioButton(hwnd, ID_RECT, ID_TOOL_LAST, tool_id);
+        let _ = CheckRadioButton(hwnd, ID_TOOL0, ID_TOOL_LAST, tool_id);
         for (id, _, _, _, _) in BUTTONS {
             let enable = if color_of(id).is_some() {
-                now.tool.uses_color()
+                now.colors
             } else if thickness_of(id).is_some() {
-                now.tool.uses_thickness()
+                now.widths
             } else if id == ID_REDO {
                 now.can_redo
             } else {
@@ -451,11 +483,11 @@ fn set_dpi(hwnd: HWND, dpi: u32) {
     let px = |v: i32| crate::platform::dpi::scale(v, dpi);
     // SAFETY: repositions and refonts our own child buttons.
     unsafe {
-        for (id, _, x, width, _) in BUTTONS {
+        for (i, &(id, _, _, width, _)) in BUTTONS.iter().enumerate() {
             let Ok(button) = GetDlgItem(Some(hwnd), id) else {
                 continue;
             };
-            let _ = MoveWindow(button, px(x), px(6), px(width), px(28), true);
+            let _ = MoveWindow(button, px(button_x(i)), px(6), px(width), px(28), true);
             if let Some(f) = font {
                 SendMessageW(
                     button,
@@ -533,6 +565,29 @@ unsafe fn wndproc_inner(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) ->
             LRESULT(0)
         }
         WM_ERASEBKGND => LRESULT(1), // we paint everything (double-buffered)
+        // Over the canvas with the Select tool: a move cursor on an annotation, else an arrow.
+        // Elsewhere (and with the drawing tools) the class cursor, the red crosshair.
+        WM_SETCURSOR
+            if wparam.0 == hwnd.0 as usize
+                && (lparam.0 & 0xFFFF) as u32 == HTCLIENT
+                && ctx.editor.tool() == Tool::Select =>
+        {
+            let mut pt = POINT::default();
+            // SAFETY: reads the cursor position and maps it into our client area.
+            let over_item = unsafe {
+                GetCursorPos(&mut pt).is_ok()
+                    && ScreenToClient(hwnd, &mut pt).as_bool()
+                    && ctx.editor.hit_test(ctx.view.to_image(pt.x, pt.y)).is_some()
+            };
+            let shape = if over_item { IDC_SIZEALL } else { IDC_ARROW };
+            // SAFETY: a shared system cursor, never freed.
+            unsafe {
+                if let Ok(cursor) = LoadCursorW(None, shape) {
+                    SetCursor(Some(cursor));
+                }
+            }
+            LRESULT(1)
+        }
         WM_PAINT => {
             paint(hwnd, ctx);
             LRESULT(0)
@@ -689,6 +744,8 @@ fn handle_key(hwnd: HWND, ctx: &mut Ctx, vk: u16) {
                 ctx.editor.on_enter();
             }
         }
+    } else if vk == VK_DELETE.0 && !ctx.editor.is_typing() {
+        ctx.editor.delete_selected();
     } else if vk == VK_ESCAPE.0 {
         if ctx.editor.on_escape() == EscapeResult::Nothing {
             // SAFETY: ask ourselves to close (runs the unsaved-changes prompt).
@@ -736,6 +793,9 @@ fn relayout(hwnd: HWND, ctx: &mut Ctx) {
         (rc.bottom - bar - 2 * margin).max(1),
     );
     ctx.view = View::fit(area, ctx.image.width() as i32, ctx.image.height() as i32);
+    // A click may miss an item by a few screen pixels, whatever the zoom.
+    ctx.editor
+        .set_hit_slop((f64::from(px(HIT_SLOP)) / ctx.view.scale).ceil() as i32);
 }
 
 fn redraw(hwnd: HWND) {
@@ -745,15 +805,19 @@ fn redraw(hwnd: HWND) {
     }
 }
 
-/// Rebuild the canvas source when the pixel items changed (a highlight or pixelate area drawn,
-/// undone or redone), so the screen shows the pixels the export will contain.
+/// Rebuild the canvas source when the pixel items changed (a highlight or redaction drawn,
+/// moved, undone or redone), so the screen shows the pixels the export will contain. A pixel
+/// item being dragged by the Select tool is left out (and drawn as a preview instead), so the
+/// drag costs one rebuild at its start and one at its end, not one per mouse move.
 fn sync_source(ctx: &mut Ctx) {
+    let moving = ctx.editor.moving_index();
     let pixels: Vec<Item> = ctx
         .editor
         .items()
         .iter()
-        .filter(|i| i.is_pixel())
-        .cloned()
+        .enumerate()
+        .filter(|&(i, item)| item.is_pixel() && Some(i) != moving)
+        .map(|(_, item)| item.clone())
         .collect();
     if pixels == ctx.src_pixels {
         return;
@@ -810,13 +874,30 @@ fn paint(hwnd: HWND, ctx: &mut Ctx) {
         // Keep annotations inside the picture while previewing.
         let saved = SaveDC(back);
         IntersectClipRect(back, v.ox, v.oy, v.ox + v.px(iw), v.oy + v.px(ih));
+        // The shape being drawn, or a pixel item being moved (left out of `src` meanwhile).
+        let preview = ctx.editor.preview().or_else(|| {
+            let item = ctx.editor.items().get(ctx.editor.moving_index()?)?;
+            item.is_pixel().then(|| item.clone())
+        });
         paint_items(
             back,
             ctx.editor.items(),
-            ctx.editor.preview().as_ref(),
+            preview.as_ref(),
             ctx.editor.typing(),
             v,
         );
+        if let Some(item) = ctx.editor.selected() {
+            // A dotted frame a few pixels outside the selected item.
+            let pad = crate::platform::dpi::scale(4, ctx.dpi);
+            let r = view_rect(v, item.bounds());
+            let frame = RECT {
+                left: r.left - pad,
+                top: r.top - pad,
+                right: r.right + pad,
+                bottom: r.bottom + pad,
+            };
+            let _ = DrawFocusRect(back, &frame);
+        }
         let _ = RestoreDC(back, saved);
 
         let _ = BitBlt(hdc, 0, 0, cw, ch, Some(back), 0, 0, SRCCOPY);
@@ -857,7 +938,8 @@ fn paint_item(hdc: HDC, item: &Item, view: View) {
             draw_text(hdc, *rect, text, style.color, view);
         }
         Item::Arrow { from, to, style } => draw_arrow(hdc, *from, *to, *style, view),
-        Item::Highlight(..) | Item::Pixelate(_) => {}
+        Item::Step { at, number, style } => draw_step(hdc, *at, *number, *style, view),
+        Item::Highlight(..) | Item::Pixelate(_) | Item::BlackBox(_) => {}
     }
 }
 
@@ -867,6 +949,14 @@ fn paint_item(hdc: HDC, item: &Item, view: View) {
 fn paint_preview(hdc: HDC, item: &Item, view: View) {
     match item {
         Item::Highlight(r, color) => alpha_fill(hdc, *r, *color, view),
+        // Exactly what the pixel layer will do: a solid black fill.
+        Item::BlackBox(r) => {
+            let vr = view_rect(view, *r);
+            // SAFETY: fills a rectangle on the DC we are given with a stock brush.
+            unsafe {
+                FillRect(hdc, &vr, HBRUSH(GetStockObject(BLACK_BRUSH).0));
+            }
+        }
         Item::Pixelate(r) => {
             let vr = view_rect(view, *r);
             // SAFETY: draws a dotted (XOR) frame on the DC we are given.
@@ -905,6 +995,69 @@ fn alpha_fill(hdc: HDC, r: Rect, color: Color, view: View) {
     // SAFETY: blends our 1×1 DIB onto the DC we are given.
     unsafe {
         let _ = AlphaBlend(hdc, vr.left, vr.top, w, h, dot.dc, 0, 0, 1, 1, blend);
+    }
+}
+
+/// A step marker: a circle filled with the item's colour, ringed and numbered in the colour that
+/// reads on it ([`Color::contrast`]).
+fn draw_step(hdc: HDC, at: Point, number: u32, style: Style, view: View) {
+    let d = view.px(style.thickness.step_diameter()).max(8);
+    let (cx, cy) = (view.ox + view.px(at.x), view.oy + view.px(at.y));
+    let mut circle = RECT {
+        left: cx - d / 2,
+        top: cy - d / 2,
+        right: cx - d / 2 + d,
+        bottom: cy - d / 2 + d,
+    };
+    let ink = colorref(style.color.contrast());
+    let digits = number.to_string();
+    let mut wide: Vec<u16> = digits.encode_utf16().collect();
+    // Smaller type for more digits, so "12" still fits inside the circle.
+    let text_h = match digits.len() {
+        1 => d * 11 / 20,
+        2 => d * 9 / 20,
+        _ => d * 7 / 20,
+    };
+    // SAFETY: GDI drawing on the DC we are given; every object created is deselected and
+    // deleted before returning.
+    unsafe {
+        let brush = CreateSolidBrush(colorref(style.color));
+        let pen = CreatePen(PS_INSIDEFRAME, (d / 15).max(2), ink);
+        let old_brush = SelectObject(hdc, HGDIOBJ(brush.0));
+        let old_pen = SelectObject(hdc, HGDIOBJ(pen.0));
+        let _ = Ellipse(hdc, circle.left, circle.top, circle.right, circle.bottom);
+        SelectObject(hdc, old_pen);
+        SelectObject(hdc, old_brush);
+        let _ = DeleteObject(HGDIOBJ(pen.0));
+        let _ = DeleteObject(HGDIOBJ(brush.0));
+
+        let font = CreateFontW(
+            -text_h.max(6),
+            0,
+            0,
+            0,
+            700,
+            0,
+            0,
+            0,
+            DEFAULT_CHARSET,
+            OUT_DEFAULT_PRECIS,
+            CLIP_DEFAULT_PRECIS,
+            CLEARTYPE_QUALITY,
+            0,
+            w!("Segoe UI"),
+        );
+        let old_font = SelectObject(hdc, HGDIOBJ(font.0));
+        SetBkMode(hdc, TRANSPARENT);
+        SetTextColor(hdc, ink);
+        DrawTextW(
+            hdc,
+            &mut wide,
+            &mut circle,
+            DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
+        );
+        SelectObject(hdc, old_font);
+        let _ = DeleteObject(HGDIOBJ(font.0));
     }
 }
 
@@ -1407,11 +1560,11 @@ mod tests {
     fn toolbar_ids_select_every_tool_colour_and_thickness() {
         let ids = BUTTONS.map(|b| b.0);
         for (i, tool) in Tool::ALL.into_iter().enumerate() {
-            let id = ID_RECT + i as i32;
+            let id = ID_TOOL0 + i as i32;
             assert!(ids.contains(&id));
             assert_eq!(tool_of(id), Some(tool));
         }
-        assert_eq!(ID_TOOL_LAST, ID_RECT + 4);
+        assert_eq!(ID_TOOL_LAST, ID_TOOL0 + Tool::ALL.len() as i32 - 1);
         for (i, color) in Color::PALETTE.into_iter().enumerate() {
             assert!(ids.contains(&(ID_COLOR0 + i as i32)));
             assert_eq!(color_of(ID_COLOR0 + i as i32), Some(color));
@@ -1425,7 +1578,7 @@ mod tests {
             ID_REDO,
             ID_SAVE,
             ID_COPY,
-            ID_RECT - 1,
+            ID_TOOL0 - 1,
             ID_COLOR0 + 6,
         ] {
             assert_eq!(
@@ -1441,7 +1594,9 @@ mod tests {
 
     #[test]
     fn toolbar_buttons_do_not_overlap_and_fit_the_minimum_width() {
-        let mut spans: Vec<(i32, i32)> = BUTTONS.iter().map(|b| (b.2, b.2 + b.3)).collect();
+        let mut spans: Vec<(i32, i32)> = (0..BUTTONS.len())
+            .map(|i| (button_x(i), button_x(i) + BUTTONS[i].3))
+            .collect();
         spans.sort_unstable();
         for w in spans.windows(2) {
             assert!(w[0].1 <= w[1].0, "{:?} overlaps {:?}", w[0], w[1]);
@@ -1454,6 +1609,100 @@ mod tests {
     fn colorref_is_bgr() {
         assert_eq!(colorref(Color::Red), COLORREF(0x0000_00FF));
         assert_eq!(colorref(Color::Blue), COLORREF(0x00E6_6E00));
+    }
+
+    #[test]
+    fn black_box_is_solid_black_in_the_export_under_the_outlines() {
+        let out = render(
+            &white(60, 40),
+            &[
+                Item::Rect(Rect::new(2, 2, 30, 30), Style::DEFAULT),
+                Item::BlackBox(Rect::new(10, 10, 30, 20)),
+            ],
+        )
+        .unwrap();
+        for y in 10..30 {
+            for x in 10..40 {
+                if x < 32 && y < 32 && (x >= 29 || y >= 29) {
+                    continue; // the rectangle's right and bottom edges, drawn on top
+                }
+                assert_eq!(px(&out, x, y), [0, 0, 0, 255], "({x},{y})");
+            }
+        }
+        assert_eq!(px(&out, 30, 15), [255, 0, 0, 255], "outline stays on top");
+        assert_eq!(px(&out, 45, 35), [255, 255, 255, 255], "outside untouched");
+        assert_eq!(px(&out, 9, 15), [255, 255, 255, 255], "left of the box");
+    }
+
+    fn grey(w: u32, h: u32) -> Rgba {
+        Rgba::from_raw(w, h, [128, 128, 128, 255].repeat((w * h) as usize)).unwrap()
+    }
+
+    /// Pixels within `r` of `(cx, cy)` for which `pick` holds.
+    fn count_near(img: &Rgba, cx: u32, cy: u32, r: u32, pick: impl Fn([u8; 4]) -> bool) -> usize {
+        let mut n = 0;
+        for y in cy - r..=cy + r {
+            for x in cx - r..=cx + r {
+                if pick(px(img, x, y)) {
+                    n += 1;
+                }
+            }
+        }
+        n
+    }
+
+    #[test]
+    fn step_marker_is_a_filled_ringed_circle_with_its_number() {
+        let marker = Item::Step {
+            at: Point::new(40, 40),
+            number: 1,
+            style: Style::DEFAULT, // red, medium: 30 px across, 2-px ring
+        };
+        let out = render(&grey(80, 80), &[marker]).unwrap();
+        assert_eq!(
+            px(&out, 50, 40),
+            [255, 0, 0, 255],
+            "red fill beside the digit"
+        );
+        assert_eq!(
+            px(&out, 54, 40),
+            [255, 255, 255, 255],
+            "white ring at the edge"
+        );
+        assert_eq!(px(&out, 60, 40), [128, 128, 128, 255], "outside the circle");
+        assert_eq!(
+            px(&out, 28, 28),
+            [128, 128, 128, 255],
+            "corner of its box, outside"
+        );
+        let white = count_near(&out, 40, 40, 6, |p| p[0] > 200 && p[1] > 200 && p[2] > 200);
+        assert!(white > 8, "white digit pixels in the middle: {white}");
+    }
+
+    #[test]
+    fn step_marker_on_yellow_is_numbered_in_black_and_larger_when_thick() {
+        let marker = Item::Step {
+            at: Point::new(40, 40),
+            number: 12,
+            style: Style {
+                color: Color::Yellow,
+                thickness: super::super::model::Thickness::Thick, // 44 px across
+            },
+        };
+        let out = render(&grey(80, 80), &[marker]).unwrap();
+        let [r, g, b] = Color::Yellow.rgb();
+        assert_eq!(
+            px(&out, 40, 22),
+            [r, g, b, 255],
+            "yellow fill above the digits"
+        );
+        assert_ne!(
+            px(&out, 40, 19),
+            [128, 128, 128, 255],
+            "the ring reaches 21 px out"
+        );
+        let dark = count_near(&out, 40, 40, 8, |p| p[0] < 80 && p[1] < 80 && p[2] < 80);
+        assert!(dark > 8, "black digit pixels in the middle: {dark}");
     }
 
     #[test]

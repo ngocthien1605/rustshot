@@ -27,9 +27,10 @@ portable zip, no installer. How to use it: **[Manual Guide](docs/MANUAL-GUIDE.md
   rubber-band, window picker with highlight, single-monitor, and all-monitors capture.
 - **Flyout** — a non-modal preview after each capture with quick actions: Annotate, Open, Open Folder,
   Copy, Copy Path, Delete.
-- **Annotate** — rectangles, text, arrows and a translucent highlighter in a six-colour palette
-  with three line widths (red by default), irreversible **pixelate** redaction, undo/redo; then
-  save an annotated copy or copy it to the clipboard.
+- **Annotate** — rectangles, text, arrows, numbered step markers and a translucent highlighter
+  in a six-colour palette with three line widths (red by default); irreversible **pixelate** and
+  **black box** redaction; select, move, restyle and delete marks; undo/redo; then save an
+  annotated copy or copy it to the clipboard.
 - **Clipboard** — copy captures straight to the clipboard as an image.
 - **Screen recording** — continuous Windows Graphics Capture → Media Foundation **H.264/MP4**,
   with constant-frame-rate pacing, pause/resume, and a recording toolbar.

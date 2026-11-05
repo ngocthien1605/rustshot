@@ -17,6 +17,9 @@ Status legend: ✅ done & verified · 🟡 in progress · ⬜ not started · �
   signing, an MSI that is actually built and tested, a capture history list.
 - **Docs:** step-by-step Manual Guide in English and Vietnamese (`MANUAL-GUIDE.md`,
   `MANUAL-GUIDE.vi.md`) next to the reference `USER-GUIDE.md`; all three ship in the zip.
+- **In review (for 0.1.10):** black box redaction, Select (move, restyle, delete) and numbered
+  step markers — PR ngocthien1605/rustshot#3. Model and render tests run on CI; the window
+  behaviour is still to be tried by hand (QA-CHECKLIST, "Annotation tools 2").
 
 The milestone sections below record each phase as it was finished; later changes are in the
 verification log at the end (newest first).
@@ -212,6 +215,14 @@ verification log at the end (newest first).
 ---
 
 ### Verification log
+- 2026-11-05: **Black box, select/move/delete, step markers** (branch, three feature commits and
+  docs). Model: `Tool::{Select, BlackBox, Step}`, snapshot undo/redo, pure hit testing and
+  clamped moves, per-item restyle, step numbering; 75 model tests (was 50), run on the Linux VM
+  through the scratch crate and on CI. Window: 21-button toolbar with computed layout, `Delete`,
+  selection frame, move cursor, step drawing, a dragged pixel item kept out of the canvas
+  rebuild. Linux VM: fmt, clippy `-D warnings` for `x86_64-pc-windows-msvc` (all targets);
+  render tests for black box and step markers run on Windows CI only. Not done: using the window
+  by hand.
 - 2026-11-04: **Release 0.1.9** (tag `v0.1.9`): the annotation tools. CI on the merged branch
   (windows-latest) ran what the Linux VM could not: all 228 tests including the 14 GDI render
   tests in `annotate/win.rs`, the Windows branch of the config path test, `cargo deny check`,

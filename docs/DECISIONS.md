@@ -412,3 +412,37 @@ Every non-obvious choice + a one-line rationale. Newest at top within each phase
   scratch crate that includes `model.rs`, since the app crate does not build there) are tested;
   the window code is type-checked and linted for `x86_64-pc-windows-msvc` only. The QA checklist
   has the manual steps.
+
+## 0.1.10 — black box, select, step markers
+
+- **Black box is a pixel item** (`imaging::blend_rect` at full opacity), like pixelate: the
+  export holds black pixels, not a black shape over the original. It exists because pixelation
+  keeps the rough shape of large text and logos. It has no colour on purpose — a coloured fill
+  is not what anyone means by redaction, and a white one would look like empty space.
+- **Undo became a history of snapshots** of the item list (one per change) instead of "pop the
+  last item". Moves, deletes and restyles are not additions, so a pop-based undo could not take
+  them back. The list is small (dozens of items), so a snapshot per change costs nothing that
+  matters. Every earlier undo/redo test passes unchanged, which is the evidence that drawing
+  behaves as before.
+- **Hit testing is pure** (`Item::hit`, `Editor::hit_test`): vector items are checked before
+  pixel items (they are drawn above them), each group from the top down; a rectangle outline is
+  hit only near its edge so items inside it stay clickable; text boxes and filled areas anywhere
+  inside; arrows by distance to the shaft or the head. The slack is 5 screen px converted to
+  image px by the window, so it feels the same at any zoom.
+- **Moves are clamped by an anchor**: an item's bounds must stay inside the image, except a step
+  marker, whose centre must (the same rule as when it is placed). The move is recomputed from the
+  item as it was at the start of the drag each time, so clamping at an edge never drifts.
+- **The selected item restyles from the toolbar**, and the toolbar shows its style; the tools'
+  own styles are untouched, so switching back to a drawing tool shows that tool's colour.
+- **A dragged pixel item is left out of the canvas** and drawn as its preview until release, so
+  dragging a redaction rebuilds the full-resolution canvas twice, not on every mouse move. The
+  cost is that the content under a pixelate area or black box shows on screen during the drag;
+  the export never includes it (it renders from the items, not from the canvas).
+- **Step numbers = highest + 1**, never renumbered automatically: renumbering on delete would
+  silently change markers the user already referred to in their text. Undo of the last marker
+  frees its number. Numbers are drawn in the palette colour's contrast colour (white on dark,
+  black on yellow and white) and shrink for two or three digits. The line thickness picks the
+  diameter (22 / 30 / 44 px) rather than adding a separate size control.
+- **Toolbar layout is computed** from each button's gap and width (`button_x`, `TOOLBAR_W`), so
+  adding a button cannot leave stale x positions; a test checks that no buttons overlap and that
+  the toolbar fits the minimum width (now about 1010 px at 96 DPI).

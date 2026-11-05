@@ -17,8 +17,8 @@ RustShot là một ứng dụng Windows nhỏ, nằm ở khay hệ thống (các
 không có cửa sổ chính. Nó làm hai việc:
 
 - **Chụp màn hình**: một vùng tự kéo, một cửa sổ, một màn hình, hoặc tất cả màn hình cùng lúc —
-  rồi ghi chú bằng khung, chữ, mũi tên, bút dạ quang, hoặc làm mờ (pixelate) những gì người khác
-  không được thấy.
+  rồi ghi chú bằng khung, chữ, mũi tên, số thứ tự, bút dạ quang, hoặc che (pixelate, tô đen)
+  những gì người khác không được thấy.
 - **Quay màn hình**: quay một vùng hoặc một cửa sổ thành video **MP4** (có thể kèm tiếng micro
   và tiếng của máy tính), hoặc thành ảnh động **GIF**.
 
@@ -129,39 +129,62 @@ chờ chừng ấy giây rồi mới chụp; trong lúc chờ không có gì hi�
      Chữ bên dưới vẫn đọc được.
    - **Pixelate** (`P`): kéo qua những gì cần che — mật khẩu, địa chỉ e-mail, tên người. Vùng đó
      biến thành các ô vuông thô. Đọc thêm mục *Che thông tin an toàn* bên dưới.
-3. **Màu và nét.** Sáu ô màu (đỏ, vàng, xanh lá, xanh dương, đen, trắng — phím `1` đến `6`) và
+   - **Black box** (`B`): kéo qua thứ cần che để phủ kín bằng màu đen — cách che an toàn nhất, vì
+     không còn lại gì, kể cả hình dáng.
+   - **Step** (`N`): bấm để đặt một vòng tròn đánh số: ①, rồi ②, ③ … — tiện cho hướng dẫn kiểu
+     "làm bước này, rồi bước kia". Vòng tròn hiện ở chỗ bạn thả chuột, nên có thể kéo để chỉnh
+     vị trí. Màu tô kín vòng tròn (số màu trắng, hoặc đen trên nền vàng và trắng); tuỳ chọn nét
+     quyết định cỡ vòng tròn.
+3. **Sửa những gì đã vẽ: Select** (`S`). Bấm vào một nét để chọn — một khung chấm chấm hiện quanh
+   nó. Sau đó:
+   - **kéo** để di chuyển (nét luôn nằm trong ảnh);
+   - nhấn **Delete** để xoá;
+   - bấm một nút **màu** hoặc **nét** để đổi;
+   - nhấn **Esc** (hoặc bấm vào chỗ trống) để bỏ chọn.
+
+   Nét nằm trên cùng được chọn trước; khung chữ nhật được chọn khi bấm vào cạnh của nó, nên vẫn
+   bấm được vào những gì bên trong. Khi trỏ chuột nằm trên một nét, con trỏ thành mũi tên bốn
+   chiều. Mỗi lần di chuyển, xoá hay đổi màu là một bước cho Undo.
+4. **Màu và nét.** Sáu ô màu (đỏ, vàng, xanh lá, xanh dương, đen, trắng — phím `1` đến `6`) và
    ba mẫu nét (mảnh, vừa, đậm — `[` mảnh hơn, `]` đậm hơn) đặt màu và độ dày nét cho **công cụ
    đang chọn**. Ô màu hoặc nét đang chọn có khung đôi màu sẫm. Mỗi công cụ nhớ lựa chọn riêng:
-   Rectangle, Text và Arrow mặc định màu đỏ, nét vừa (y như trước khi có các tuỳ chọn này),
-   Highlight mặc định màu vàng. Khi công cụ không dùng một tuỳ chọn, các nút đó bị làm mờ
-   (Pixelate không có màu; Highlight và Pixelate không có nét). Chọn màu trong lúc đang gõ chữ
-   thì đoạn chữ đang gõ đổi màu theo.
-4. **Undo** (`Ctrl+Z`) bỏ nét vừa vẽ; **Redo** (`Ctrl+Y` hoặc `Ctrl+Shift+Z`) lấy lại nét đó.
-   Vẽ thêm nét mới sau khi Undo thì không Redo được nữa; nút Redo bị làm mờ khi không có gì để
-   lấy lại.
-5. **Save** (`Ctrl+S`) lưu một bản sao cạnh ảnh gốc, tên `…_annotated.png`; lưu lần nữa thành
+   Rectangle, Text, Arrow và Step mặc định màu đỏ, nét vừa (y như trước khi có các tuỳ chọn
+   này), Highlight mặc định màu vàng. Khi công cụ không dùng một tuỳ chọn, các nút đó bị làm mờ
+   (Pixelate và Black box không có màu; Highlight, Pixelate và Black box không có nét). Chọn màu
+   trong lúc đang gõ chữ thì đoạn chữ đang gõ đổi màu theo.
+5. **Undo** (`Ctrl+Z`) bỏ thay đổi vừa làm — một nét mới, một lần di chuyển, xoá hay đổi màu;
+   **Redo** (`Ctrl+Y` hoặc `Ctrl+Shift+Z`) lấy lại thay đổi đó. Làm thay đổi mới sau khi Undo thì
+   không Redo được nữa; nút Redo bị làm mờ khi không có gì để lấy lại.
+6. **Save** (`Ctrl+S`) lưu một bản sao cạnh ảnh gốc, tên `…_annotated.png`; lưu lần nữa thành
    `…_annotated_2.png`, v.v. **Ảnh gốc không bao giờ bị thay đổi.**
-6. **Copy** (`Ctrl+C`) chép ảnh đã ghi chú vào clipboard.
+7. **Copy** (`Ctrl+C`) chép ảnh đã ghi chú vào clipboard.
 
 Đóng trình ghi chú khi còn nét chưa lưu thì RustShot hỏi có lưu không. Nét vẽ được đặt theo độ
-phân giải gốc của ảnh, dù cửa sổ trình ghi chú nhỏ đến đâu. Highlight và Pixelate thay đổi chính
-điểm ảnh, nên chúng luôn nằm *dưới* khung, mũi tên và chữ.
+phân giải gốc của ảnh, dù cửa sổ trình ghi chú nhỏ đến đâu. Highlight, Pixelate và Black box thay
+đổi chính điểm ảnh, nên chúng luôn nằm *dưới* khung, mũi tên, chữ và vòng tròn đánh số.
+
+**Số thứ tự của Step** đếm từ 1: vòng tròn mới mang số lớn hơn số lớn nhất đang có trên ảnh một
+đơn vị. Undo hoặc xoá vòng tròn cuối cùng thì số đó được dùng lại; xoá một vòng ở giữa thì các
+vòng khác giữ nguyên số (nên có thể thấy 1, 3 — hãy di chuyển hoặc xoá để sắp xếp lại).
 
 **Các phím chữ và số** chỉ có tác dụng khi bạn không gõ chữ trong khung Text (lúc đang gõ, chúng
 là chữ bạn gõ). RustShot dựa vào ký tự mà phím gõ ra, nên dùng được với mọi kiểu bàn phím. Khi bộ
 gõ tiếng Nhật, Trung hay Hàn (IME) đang bật, phím sẽ vào bộ gõ: hãy chuyển sang nhập trực tiếp
 (chữ và số nửa độ rộng, ví dụ bằng phím `半角/全角`) hoặc dùng thanh công cụ.
 
-**Che thông tin an toàn.** Pixelate thay mỗi ô 12 × 12 điểm ảnh trong vùng bằng màu trung bình
-của ô đó trong ảnh được lưu và ảnh được chép. Chi tiết bị che hoàn toàn không còn trong ảnh đó,
-nên không ai gỡ một "lớp phủ" ra để xem được. Cần nhớ ba điều:
+**Che thông tin an toàn.** Trong ảnh được lưu và ảnh được chép, Pixelate thay mỗi ô 12 × 12 điểm
+ảnh trong vùng bằng màu trung bình của ô đó, còn Black box tô đen cả vùng. Dù cách nào, chi tiết
+bị che hoàn toàn không còn trong ảnh đó, nên không ai gỡ một "lớp phủ" ra để xem được. Cần nhớ
+mấy điều:
 
 - **Ảnh chụp gốc vẫn hiện đầy đủ mọi thứ.** Chỉ bản `…_annotated` và ảnh trong clipboard bị
   làm mờ. Hãy chia sẻ bản đó, và xoá ảnh gốc (nút **Delete** ở ô xem trước, hoặc trong
   Explorer) nếu không được giữ lại.
 - **Kéo rộng ra quá mép** của thứ cần che, để không ô nào chỉ chứa một phần của chữ.
 - Pixelate dành cho chữ cỡ bình thường như tên, địa chỉ, con số. Chữ rất to hay một logo quen
-  thuộc vẫn có thể nhận ra qua hình dáng thô: tốt nhất đừng chụp những thứ đó vào ảnh.
+  thuộc vẫn có thể nhận ra qua hình dáng thô: hãy dùng **Black box** cho những thứ đó.
+- Trong lúc bạn **kéo** một vùng Pixelate hay Black box bằng Select, trình ghi chú hiện thứ nằm
+  bên dưới cho đến khi thả chuột (chỉ trên màn hình; ảnh được lưu luôn bị che).
 
 ## 7. Quay video (MP4)
 
@@ -262,13 +285,15 @@ chọn phím tắt khác trong RustShot. Chú thích ở khay cho biết có bao
 
 | Thao tác | Phím |
 |---|---|
-| Công cụ Rectangle / Text / Arrow / Highlight / Pixelate | `R` / `T` / `A` / `H` / `P` |
+| Công cụ Select / Rectangle / Text / Arrow | `S` / `R` / `T` / `A` |
+| Công cụ Highlight / Pixelate / Black box / Step | `H` / `P` / `B` / `N` |
+| Xoá nét đang chọn | `Delete` |
 | Màu đỏ, vàng, xanh lá, xanh dương, đen, trắng | `1` … `6` |
 | Nét mảnh hơn / đậm hơn | `[` / `]` |
 | Undo / Redo | `Ctrl+Z` / `Ctrl+Y` hoặc `Ctrl+Shift+Z` |
 | Save / Copy | `Ctrl+S` / `Ctrl+C` |
 | Đặt chữ vào ảnh / xuống dòng trong chữ | `Enter` / `Shift+Enter` hoặc `Alt+Enter` |
-| Huỷ chữ hoặc hình đang vẽ; nếu không có gì thì đóng trình ghi chú | `Esc` |
+| Huỷ chữ, hình đang vẽ hoặc đang di chuyển, nếu không thì bỏ chọn; nếu không có gì thì đóng trình ghi chú | `Esc` |
 
 Khi đang gõ chữ trong khung Text, các phím đơn (`R`, `1`, `[` …) gõ ra chữ thay vì làm phím tắt.
 

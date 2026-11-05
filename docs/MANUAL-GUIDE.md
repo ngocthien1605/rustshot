@@ -16,8 +16,8 @@ RustShot is a small Windows app that lives in the system tray (the icons next to
 has no main window. It does two things:
 
 - **Screenshots**: a region you drag, one window, one monitor, or every monitor at once —
-  then mark them up with rectangles, text, arrows and a highlighter, or pixelate what others
-  must not see.
+  then mark them up with rectangles, text, arrows, numbered steps and a highlighter, or
+  pixelate or black out what others must not see.
 - **Screen recordings**: a region or window recorded to **MP4** video (optionally with
   microphone and computer sound), or to an animated **GIF**.
 
@@ -129,23 +129,45 @@ then waits that many seconds before capturing. Nothing is shown while it waits.
      highlighter pen. The text underneath stays readable.
    - **Pixelate** (`P`): drag over anything you want to hide — a password, an e-mail address, a
      name. The area turns into coarse blocks. Read *Hiding information safely* below.
-3. **Colour and line.** The six colour squares (red, yellow, green, blue, black, white — keys
+   - **Black box** (`B`): drag over something to cover it with solid black — the safest way to
+     hide it, because nothing of it is left, not even its shape.
+   - **Step** (`N`): click to place a numbered circle: ①, then ②, ③ … — handy for "do this, then
+     that" instructions. The marker appears where you release the mouse button, so you can drag
+     to aim it. The colour fills the circle (the number is white, or black on yellow and white);
+     the line setting chooses its size.
+3. **Change what you drew: Select** (`S`). Click a mark to select it — a dotted frame appears
+   around it. Then:
+   - **drag** it to move it (it stays inside the picture);
+   - press **Delete** to remove it;
+   - click a **colour** or **line** button to change it;
+   - press **Esc** (or click an empty spot) to deselect.
+
+   The mark on top is picked first; a rectangle outline is picked by its edge, so you can still
+   click what is inside it. Over a mark, the pointer becomes a four-way arrow. Each move, delete
+   or change is one step for Undo.
+4. **Colour and line.** The six colour squares (red, yellow, green, blue, black, white — keys
    `1` to `6`) and the three line samples (thin, medium, thick — `[` thinner, `]` thicker) set
    the colour and line of the **current tool**. The chosen square or line has a dark double
-   frame. Each tool remembers its own choice: Rectangle, Text and Arrow start red and medium
-   (exactly as before these options existed), Highlight starts yellow. When a tool does not use
-   a setting, its buttons are greyed out (Pixelate has no colour; Highlight and Pixelate have no
-   line). Picking a colour while typing changes the text you are typing.
-4. **Undo** (`Ctrl+Z`) removes the last mark; **Redo** (`Ctrl+Y` or `Ctrl+Shift+Z`) brings it
-   back. Drawing something new after an undo clears what could be redone, and Redo is greyed out
-   when there is nothing to redo.
-5. **Save** (`Ctrl+S`) writes a copy next to the original named `…_annotated.png`; saving again
+   frame. Each tool remembers its own choice: Rectangle, Text, Arrow and Step start red and
+   medium (exactly as before these options existed), Highlight starts yellow. When a tool does
+   not use a setting, its buttons are greyed out (Pixelate and Black box have no colour;
+   Highlight, Pixelate and Black box have no line). Picking a colour while typing changes the
+   text you are typing.
+5. **Undo** (`Ctrl+Z`) takes back the last change — a new mark, a move, a delete or a colour
+   change; **Redo** (`Ctrl+Y` or `Ctrl+Shift+Z`) brings it back. Making a new change after an
+   undo clears what could be redone, and Redo is greyed out when there is nothing to redo.
+6. **Save** (`Ctrl+S`) writes a copy next to the original named `…_annotated.png`; saving again
    makes `…_annotated_2.png`, and so on. **The original screenshot is never changed.**
-6. **Copy** (`Ctrl+C`) puts the annotated image on the clipboard.
+7. **Copy** (`Ctrl+C`) puts the annotated image on the clipboard.
 
 Closing the editor with unsaved marks asks whether to save first. Marks are drawn at the
-screenshot's full resolution, however small the editor window is. Highlight and Pixelate change
-the picture itself, so they always lie *under* rectangles, arrows and text.
+screenshot's full resolution, however small the editor window is. Highlight, Pixelate and Black
+box change the picture itself, so they always lie *under* rectangles, arrows, text and step
+markers.
+
+**Step numbers** count up from 1: the next marker gets one more than the highest number on the
+picture. Undoing or deleting the last marker frees its number again; deleting one in the middle
+leaves the others as they are (so you may see 1, 3 — move or delete markers to tidy up).
 
 **The letter and number keys** work while you are not typing in a text box (while you type,
 they are part of your text). They follow the character the key types, so they work on any
@@ -154,16 +176,19 @@ to the IME instead: switch it to direct input (half-width alphanumeric, e.g. wit
 `半角/全角` key) or use the toolbar.
 
 **Hiding information safely.** Pixelate replaces every 12 × 12-pixel block of the area with the
-block's average colour in the saved and copied image. The hidden detail is not in that image at
-all, so nobody can uncover it by removing a layer. Keep three things in mind:
+block's average colour, and Black box fills the area with black, in the saved and copied image.
+Either way the hidden detail is not in that image at all, so nobody can uncover it by removing a
+layer. Keep three things in mind:
 
 - **The original screenshot still shows everything.** Only the `…_annotated` copy and the
   clipboard image are pixelated. Share that copy, and delete the original (preview panel
   **Delete**, or in Explorer) if it must not be kept.
 - **Drag well past the edges** of what you hide, so no block holds only part of a letter.
 - Pixelate is meant for normal-size text such as names, addresses and numbers. Very large
-  lettering or a well-known logo can stay recognisable by its rough shape: leave such things out
-  of the capture instead.
+  lettering or a well-known logo can stay recognisable by its rough shape: use **Black box** for
+  those.
+- While you **drag** a pixelate area or black box with Select, the editor shows what is under it
+  until you let go (only on screen; the saved image is always covered).
 
 ## 7. Record a video (MP4)
 
@@ -268,13 +293,15 @@ Settings tells you if a new one is taken too. The tray menu always works.
 
 | Action | Keys |
 |---|---|
-| Rectangle / Text / Arrow / Highlight / Pixelate tool | `R` / `T` / `A` / `H` / `P` |
+| Select / Rectangle / Text / Arrow tool | `S` / `R` / `T` / `A` |
+| Highlight / Pixelate / Black box / Step tool | `H` / `P` / `B` / `N` |
+| Delete the selected mark | `Delete` |
 | Colour red, yellow, green, blue, black, white | `1` … `6` |
 | Thinner / thicker line | `[` / `]` |
 | Undo / Redo | `Ctrl+Z` / `Ctrl+Y` or `Ctrl+Shift+Z` |
 | Save / Copy | `Ctrl+S` / `Ctrl+C` |
 | Place the text / new line in the text | `Enter` / `Shift+Enter` or `Alt+Enter` |
-| Cancel the text or shape in progress; close the editor if nothing is | `Esc` |
+| Cancel the text, shape or move in progress, else deselect; close the editor if nothing is | `Esc` |
 
 While you are typing in a text box, the single keys (`R`, `1`, `[` …) type text instead.
 
