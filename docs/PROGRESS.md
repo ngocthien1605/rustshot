@@ -2,25 +2,23 @@
 
 Status legend: ✅ done & verified · 🟡 in progress · ⬜ not started · 🔬 manual-QA only (GPU/UI)
 
-## Current status (2026-11-05, release 0.1.10)
+## Current status (2026-11-05, release 0.1.11)
 
-- **Shipped:** v0.1.10 on GitHub (portable zip + `.sha256`, built by the release workflow).
+- **Shipped:** v0.1.11 on GitHub (portable zip + `.sha256`, built by the release workflow).
   Every phase M0–M7 is done, followed by review items 1–7, the Settings microphone picker, the
-  final-review fixes and two rounds of annotation tools: pixelate, arrow, highlight, palette,
-  line widths and redo (0.1.9); black box, select/move/restyle/delete and step markers (0.1.10).
-- **Gate:** fmt, clippy `-D warnings`, build and **256 tests** green with `--locked` on CI
+  final-review fixes, two rounds of annotation tools (0.1.9: pixelate, arrow, highlight,
+  palette, line widths, redo; 0.1.10: black box, select/move/restyle/delete, step markers) and
+  0.1.11: crop, pin to screen and a capture history.
+- **Gate:** fmt, clippy `-D warnings`, build and **278 tests** green with `--locked` on CI
   (Windows); `cargo deny check` ok; MSRV 1.90 checked.
-- **Open:** the 0.1.10 editor tools have not been used by a person yet (QA-CHECKLIST,
-  "Annotation tools 2"; the 0.1.9 tools were tried by the owner and looked fine); the manual
-  hardware checks still to run (Bluetooth mic through the picker, device unplug, read-back
-  throttle, tray tooltip, run at startup, display unplug, GPU reset, a full 3-minute A/V sync);
-  and the deferred items: code signing, an MSI that is actually built and tested, a capture
-  history list.
+- **Open:** the 0.1.10 and 0.1.11 windows have not been used by a person yet (QA-CHECKLIST,
+  "Annotation tools 2" and "Crop, Pin to screen, History"; the 0.1.9 tools were tried by the
+  owner and looked fine); the manual hardware checks still to run (Bluetooth mic through the
+  picker, device unplug, read-back throttle, tray tooltip, run at startup, display unplug, GPU
+  reset, a full 3-minute A/V sync); and the deferred items: code signing, an MSI that is
+  actually built and tested.
 - **Docs:** step-by-step Manual Guide in English and Vietnamese (`MANUAL-GUIDE.md`,
   `MANUAL-GUIDE.vi.md`) next to the reference `USER-GUIDE.md`; all three ship in the zip.
-- **In review:** Crop (editor), Pin to screen, Capture history — PR ngocthien1605/rustshot#5.
-  Pure logic tested (editor model incl. crop, pin geometry, `config::history`); the windows are
-  still to be tried by hand (QA-CHECKLIST, "Crop, Pin to screen, History").
 
 The milestone sections below record each phase as it was finished; later changes are in the
 verification log at the end (newest first).
@@ -216,6 +214,10 @@ verification log at the end (newest first).
 ---
 
 ### Verification log
+- 2026-11-05: **Release 0.1.11** (tag `v0.1.11`): crop in the editor, pin to screen, capture
+  history. CI on the PR (windows-latest) ran 278 tests including the crop export, image/DIB round
+  trip and History layout tests, cargo-deny and the portable zip build. The windows themselves
+  are still to be tried by hand.
 - 2026-11-05: **Crop, Pin to screen, Capture history** (branch, three feature commits and docs).
   Crop: `model::Doc` (items + crop) in undo snapshots and the unsaved check, `win::export` cuts
   after rendering; 81 editor-model tests (was 75). Pin: `ui/pin` (pure geometry, 5 tests; Win32

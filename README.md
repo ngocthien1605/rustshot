@@ -8,7 +8,7 @@ and global hotkeys.
 > Clean-room implementation inspired by the *capabilities* of Screenpresso. It contains no
 > Screenpresso code, assets, UI, or branding.
 
-**Latest release: [v0.1.10](https://github.com/ngocthien1605/rustshot/releases/latest)** — a
+**Latest release: [v0.1.11](https://github.com/ngocthien1605/rustshot/releases/latest)** — a
 portable zip, no installer. How to use it: **[Manual Guide](docs/MANUAL-GUIDE.md)** ·
 **[Hướng dẫn sử dụng (Tiếng Việt)](docs/MANUAL-GUIDE.vi.md)**.
 
