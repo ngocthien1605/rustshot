@@ -37,6 +37,7 @@ pub fn build(dispatch_hwnd: HWND) -> Result<TrayIcon> {
         .context("building Record submenu")?;
 
     let open_folder = MenuItem::new("Open output folder", true, None);
+    let history = MenuItem::new("History…", true, None);
     let settings = MenuItem::new("Settings…", true, None);
     let quit = MenuItem::new("Quit RustShot", true, None);
 
@@ -44,6 +45,7 @@ pub fn build(dispatch_hwnd: HWND) -> Result<TrayIcon> {
         &screenshot_menu,
         &record_menu,
         &PredefinedMenuItem::separator(),
+        &history,
         &open_folder,
         &settings,
         &PredefinedMenuItem::separator(),
@@ -60,6 +62,7 @@ pub fn build(dispatch_hwnd: HWND) -> Result<TrayIcon> {
             (rec_region.id().clone(), Action::RecordRegion),
             (rec_gif.id().clone(), Action::RecordGif),
             (open_folder.id().clone(), Action::OpenFolder),
+            (history.id().clone(), Action::History),
             (settings.id().clone(), Action::Settings),
             (quit.id().clone(), Action::Quit),
         ],

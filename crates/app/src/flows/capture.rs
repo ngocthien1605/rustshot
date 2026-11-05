@@ -140,6 +140,7 @@ fn run_capture(
     let name = imaging::auto_name(imaging::Timestamp::now_local(), ext);
     let path = imaging::save_image_unique(&img, out_dir, &name, settings.screenshot.jpeg_quality)?;
     tracing::info!("saved screenshot to {}", path.display());
+    crate::history::record(&path, config::history::EntryKind::Screenshot);
 
     if settings.screenshot.copy_to_clipboard {
         if let Err(e) = crate::clipboard::copy_image(&img) {

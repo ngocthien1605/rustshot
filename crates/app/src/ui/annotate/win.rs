@@ -1298,6 +1298,7 @@ fn save(hwnd: HWND, ctx: &mut Ctx) {
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_default();
             tracing::info!("saved annotated screenshot to {}", path.display());
+            crate::history::record(&path, config::history::EntryKind::Annotated);
             set_status(hwnd, ctx, &format!("saved as {name}"));
         }
         Err(e) => {

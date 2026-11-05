@@ -4,6 +4,7 @@
 //! - base:   `%APPDATA%\RustShot`
 //! - config: `%APPDATA%\RustShot\config.toml`
 //! - logs:   `%APPDATA%\RustShot\logs`
+//! - history: `%APPDATA%\RustShot\history.toml`
 //! - default output: `<Pictures>\RustShot`, falling back to `%APPDATA%\RustShot\captures`
 
 use std::path::PathBuf;
@@ -24,6 +25,11 @@ pub fn app_dir() -> Result<PathBuf, ConfigError> {
 /// `%APPDATA%\RustShot\config.toml`.
 pub fn config_file() -> Result<PathBuf, ConfigError> {
     Ok(app_dir()?.join("config.toml"))
+}
+
+/// `%APPDATA%\RustShot\history.toml` — the capture history.
+pub fn history_file() -> Result<PathBuf, ConfigError> {
+    Ok(app_dir()?.join("history.toml"))
 }
 
 /// `%APPDATA%\RustShot\logs`.

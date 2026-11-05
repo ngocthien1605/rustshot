@@ -8,6 +8,7 @@ mod clipboard;
 mod dev;
 mod dispatch;
 mod flows;
+mod history;
 mod hotkeys;
 mod icon;
 mod logging;

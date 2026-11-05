@@ -50,6 +50,8 @@ pub enum Action {
     /// The recording toolbar's tick: check whether the recording ended on its own.
     RecordPoll,
     FlyoutPin,
+    /// Tray → History…: open (or raise) the History window.
+    History,
 }
 
 impl Action {
@@ -78,6 +80,7 @@ impl Action {
             20 => FlyoutAnnotate,
             21 => RecordPoll,
             22 => FlyoutPin,
+            23 => History,
             _ => return None,
         })
     }
@@ -245,6 +248,7 @@ fn handle(action: Action) {
             }
         }
         Settings => crate::ui::settings::open(),
+        History => crate::ui::history::open(),
         Quit => {
             tracing::info!("Quit selected");
             // Finalize an active recording (or cancel a countdown) and drop the flyout *before*
@@ -371,6 +375,7 @@ mod tests {
             FlyoutAnnotate,
             RecordPoll,
             FlyoutPin,
+            History,
         ];
         for a in all {
             assert_eq!(Action::from_u32(a as u32), Some(a), "{a:?}");

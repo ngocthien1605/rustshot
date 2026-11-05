@@ -3,6 +3,7 @@
 
 pub(crate) mod annotate;
 pub(crate) mod flyout;
+pub(crate) mod history;
 pub(crate) mod overlay;
 pub(crate) mod pin;
 pub(crate) mod recording;

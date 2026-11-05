@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+pub mod history;
 pub mod hotkey;
 pub mod paths;
 
@@ -191,6 +192,25 @@ impl Default for RecordingSettings {
     }
 }
 
+/// Capture-history settings (`config.toml` only; no Settings dialog controls).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct HistorySettings {
+    /// Keep a list of saved captures for the History window.
+    pub enabled: bool,
+    /// How many entries to keep (10–1000).
+    pub max_entries: u32,
+}
+
+impl Default for HistorySettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            max_entries: 100,
+        }
+    }
+}
+
 /// The `schema_version` this build writes. Bump it, and add a step to [`Settings::sanitize`],
 /// when an existing key changes meaning.
 pub const SCHEMA_VERSION: u32 = 1;
@@ -210,6 +230,7 @@ pub struct Settings {
     pub screenshot: ScreenshotSettings,
     pub recording: RecordingSettings,
     pub hotkeys: HotkeyMap,
+    pub history: HistorySettings,
 }
 
 impl Default for Settings {
@@ -221,6 +242,7 @@ impl Default for Settings {
             screenshot: ScreenshotSettings::default(),
             recording: RecordingSettings::default(),
             hotkeys: HotkeyMap::default(),
+            history: HistorySettings::default(),
         }
     }
 }
@@ -290,6 +312,10 @@ impl Settings {
             self.recording.countdown_seconds = 3;
             changed = true;
         }
+        if !(10..=1000).contains(&self.history.max_entries) {
+            self.history.max_entries = 100;
+            changed = true;
+        }
         changed
     }
 
@@ -354,23 +380,7 @@ impl Settings {
     /// Save settings to `path`, creating parent directories as needed. Writes atomically
     /// (to a temp file in the same directory, then rename) to avoid a half-written config.
     pub fn save_to(&self, path: &Path) -> Result<(), ConfigError> {
-        let text = self.to_toml()?;
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(|source| ConfigError::Io {
-                path: parent.to_path_buf(),
-                source,
-            })?;
-        }
-        let tmp = path.with_extension("toml.tmp");
-        std::fs::write(&tmp, text.as_bytes()).map_err(|source| ConfigError::Io {
-            path: tmp.clone(),
-            source,
-        })?;
-        std::fs::rename(&tmp, path).map_err(|source| ConfigError::Io {
-            path: path.to_path_buf(),
-            source,
-        })?;
-        Ok(())
+        write_atomically(path, &self.to_toml()?)
     }
 
     /// Convenience: load from the standard `%APPDATA%\RustShot\config.toml`.
@@ -382,6 +392,27 @@ impl Settings {
     pub fn save(&self) -> Result<(), ConfigError> {
         self.save_to(&paths::config_file()?)
     }
+}
+
+/// Write `text` to `path` via a temp file in the same folder and a rename, so a crash never
+/// leaves it half-written. Creates the folder if needed.
+pub(crate) fn write_atomically(path: &Path, text: &str) -> Result<(), ConfigError> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|source| ConfigError::Io {
+            path: parent.to_path_buf(),
+            source,
+        })?;
+    }
+    let tmp = path.with_extension("toml.tmp");
+    std::fs::write(&tmp, text.as_bytes()).map_err(|source| ConfigError::Io {
+        path: tmp.clone(),
+        source,
+    })?;
+    std::fs::rename(&tmp, path).map_err(|source| ConfigError::Io {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -516,6 +547,27 @@ mod tests {
         newer.sanitize();
         assert_eq!(newer.schema_version, 99);
         assert_eq!(Settings::default().schema_version, SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn history_defaults_and_bounds() {
+        let s = Settings::default();
+        assert!(s.history.enabled);
+        assert_eq!(s.history.max_entries, 100);
+        let mut s =
+            Settings::from_toml("[history]\nmax_entries = 5\n", Path::new("t.toml")).unwrap();
+        assert!(s.sanitize());
+        assert_eq!(s.history.max_entries, 100);
+        let mut s = Settings::from_toml(
+            "[history]\nenabled = false\nmax_entries = 500\n",
+            Path::new("t.toml"),
+        )
+        .unwrap();
+        assert!(!s.sanitize());
+        assert_eq!((s.history.enabled, s.history.max_entries), (false, 500));
+        // A file from before history existed reads the defaults.
+        let s = Settings::from_toml("run_at_startup = true\n", Path::new("t.toml")).unwrap();
+        assert_eq!(s.history, HistorySettings::default());
     }
 
     #[test]
