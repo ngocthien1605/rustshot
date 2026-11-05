@@ -121,15 +121,19 @@ pub enum Tool {
     Highlight,
     /// Drag a rectangle whose pixels are pixelated (irreversibly) in the saved/copied image.
     Pixelate,
+    /// Drag a rectangle that is filled solid black in the saved/copied image: the strongest
+    /// redaction, for what pixelation could leave recognisable.
+    BlackBox,
 }
 
 impl Tool {
-    pub const ALL: [Tool; 5] = [
+    pub const ALL: [Tool; 6] = [
         Tool::Rect,
         Tool::Text,
         Tool::Arrow,
         Tool::Highlight,
         Tool::Pixelate,
+        Tool::BlackBox,
     ];
 
     fn index(self) -> usize {
@@ -139,6 +143,7 @@ impl Tool {
             Tool::Arrow => 2,
             Tool::Highlight => 3,
             Tool::Pixelate => 4,
+            Tool::BlackBox => 5,
         }
     }
 
@@ -153,12 +158,12 @@ impl Tool {
         }
     }
 
-    /// Whether the palette applies (a pixelate area has no colour).
+    /// Whether the palette applies (a pixelate area has no colour; a black box is always black).
     pub fn uses_color(self) -> bool {
-        self != Tool::Pixelate
+        !matches!(self, Tool::Pixelate | Tool::BlackBox)
     }
 
-    /// Whether the thickness applies (a highlight and a pixelate area are filled boxes).
+    /// Whether the thickness applies (highlight, pixelate and black box are filled areas).
     pub fn uses_thickness(self) -> bool {
         matches!(self, Tool::Rect | Tool::Text | Tool::Arrow)
     }
@@ -184,12 +189,17 @@ pub enum Item {
     Highlight(Rect, Color),
     /// A redacted area: pixelated in [`PIXELATE_BLOCK`] squares by [`apply_pixel_layer`].
     Pixelate(Rect),
+    /// A redacted area filled solid black by [`apply_pixel_layer`].
+    BlackBox(Rect),
 }
 
 impl Item {
     /// True for items that change the screenshot's pixels (drawn below everything else).
     pub fn is_pixel(&self) -> bool {
-        matches!(self, Item::Highlight(..) | Item::Pixelate(_))
+        matches!(
+            self,
+            Item::Highlight(..) | Item::Pixelate(_) | Item::BlackBox(_)
+        )
     }
 }
 
@@ -202,7 +212,7 @@ pub enum Shortcut {
     Thicker,
 }
 
-/// The shortcut for a typed character: `R` `T` `A` `H` `P` pick a tool, `1`–`6` a colour,
+/// The shortcut for a typed character: `R` `T` `A` `H` `P` `B` pick a tool, `1`–`6` a colour,
 /// `[` / `]` step the thickness. Case-insensitive. Characters (not key codes) are matched, so
 /// the keys work the same on any keyboard layout.
 pub fn shortcut(c: char) -> Option<Shortcut> {
@@ -212,6 +222,7 @@ pub fn shortcut(c: char) -> Option<Shortcut> {
         'a' => Shortcut::Tool(Tool::Arrow),
         'h' => Shortcut::Tool(Tool::Highlight),
         'p' => Shortcut::Tool(Tool::Pixelate),
+        'b' => Shortcut::Tool(Tool::BlackBox),
         '[' => Shortcut::Thinner,
         ']' => Shortcut::Thicker,
         d @ '1'..='6' => {
@@ -250,7 +261,7 @@ pub struct Editor {
     drag: Option<(Point, Point)>,
     typing: Option<Typing>,
     /// Each tool's style, indexed by [`Tool::index`].
-    styles: [Style; 5],
+    styles: [Style; Tool::ALL.len()],
 }
 
 impl Editor {
@@ -327,6 +338,7 @@ impl Editor {
             },
             Tool::Highlight => Item::Highlight(r, style.color),
             Tool::Pixelate => Item::Pixelate(r),
+            Tool::BlackBox => Item::BlackBox(r),
         })
     }
 
@@ -397,6 +409,7 @@ impl Editor {
             Tool::Rect => self.push(Item::Rect(r, style)),
             Tool::Highlight => self.push(Item::Highlight(r, style.color)),
             Tool::Pixelate => self.push(Item::Pixelate(r)),
+            Tool::BlackBox => self.push(Item::BlackBox(r)),
             Tool::Arrow => {} // handled above
             Tool::Text => {
                 self.typing = Some(Typing {
@@ -521,6 +534,7 @@ pub fn apply_pixel_layer(img: &Rgba, items: &[Item]) -> Rgba {
     for item in items {
         match item {
             Item::Pixelate(r) => imaging::pixelate_in_place(&mut out, *r, PIXELATE_BLOCK),
+            Item::BlackBox(r) => imaging::blend_rect_in_place(&mut out, *r, [0, 0, 0], 255),
             Item::Highlight(r, color) => {
                 imaging::blend_rect_in_place(&mut out, *r, color.rgb(), HIGHLIGHT_ALPHA)
             }
@@ -1227,9 +1241,10 @@ mod tests {
     #[test]
     fn which_tools_use_colour_and_thickness() {
         for tool in Tool::ALL {
-            let filled = matches!(tool, Tool::Highlight | Tool::Pixelate);
+            let filled = matches!(tool, Tool::Highlight | Tool::Pixelate | Tool::BlackBox);
             assert_eq!(tool.uses_thickness(), !filled, "{tool:?}");
-            assert_eq!(tool.uses_color(), tool != Tool::Pixelate, "{tool:?}");
+            let colourless = matches!(tool, Tool::Pixelate | Tool::BlackBox);
+            assert_eq!(tool.uses_color(), !colourless, "{tool:?}");
         }
     }
 
@@ -1449,5 +1464,49 @@ mod tests {
         assert!(e.is_dragging());
         e.on_up(Point::new(12, 12));
         assert!(!e.is_dragging());
+    }
+
+    #[test]
+    fn black_box_tool_commits_a_clamped_area_with_the_min_size_rule() {
+        let mut e = Editor::new(200, 100);
+        assert!(e.apply_shortcut(shortcut('b').unwrap()));
+        assert_eq!(e.tool(), Tool::BlackBox);
+        drag(&mut e, (150, 90), (-20, 30));
+        assert_eq!(e.items(), &[Item::BlackBox(Rect::new(0, 30, 150, 60))]);
+        assert!(e.items()[0].is_pixel());
+        drag(&mut e, (10, 10), (10 + MIN_SIZE - 1, 80));
+        assert_eq!(e.items().len(), 1, "too narrow: an accidental click");
+        assert_eq!(
+            e.preview(),
+            None,
+            "nothing is previewed once the mouse is up"
+        );
+        e.on_down(Point::new(10, 10));
+        e.on_move(Point::new(30, 20));
+        assert_eq!(e.preview(), Some(Item::BlackBox(Rect::new(10, 10, 20, 10))));
+    }
+
+    #[test]
+    fn black_box_fills_solid_black_and_hides_everything() {
+        let src = detailed(30, 20);
+        let area = Rect::new(5, 4, 12, 8);
+        let out = apply_pixel_layer(&src, &[Item::BlackBox(area)]);
+        for y in 0..20 {
+            for x in 0..30 {
+                let inside = area.contains(Point::new(x as i32, y as i32));
+                let want = if inside {
+                    [0, 0, 0, 255]
+                } else {
+                    src.get_pixel(x, y).0
+                };
+                assert_eq!(out.get_pixel(x, y).0, want, "({x},{y})");
+            }
+        }
+        // Two different sources give the identical redacted area: nothing is recoverable.
+        let other = apply_pixel_layer(
+            &Rgba::from_raw(30, 20, [200, 150, 100, 255].repeat(30 * 20)).unwrap(),
+            &[Item::BlackBox(area)],
+        );
+        assert_eq!(out.get_pixel(10, 8), other.get_pixel(10, 8));
     }
 }
