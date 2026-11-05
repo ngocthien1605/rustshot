@@ -1223,17 +1223,7 @@ fn draw_text(hdc: HDC, rect: Rect, text: &str, color: Color, view: View) {
 
 /// The screenshot as a DIB-backed memory DC (top-down BGRA, opaque).
 fn make_source_dc(img: &Rgba) -> Result<Surface> {
-    let screen = ScreenDc::get()?;
-    let mut surface = Surface::dib(screen.0, img.width() as i32, img.height() as i32)?;
-    let dst = surface
-        .pixels_mut()
-        .ok_or_else(|| anyhow!("CreateDIBSection returned no pixel buffer"))?;
-    let (dst_px, _) = dst.as_chunks_mut::<4>();
-    let (src_px, _) = img.as_raw().as_chunks::<4>();
-    for (d, s) in dst_px.iter_mut().zip(src_px) {
-        *d = [s[2], s[1], s[0], 255];
-    }
-    Ok(surface)
+    crate::platform::gdi::surface_from_rgba(img)
 }
 
 /// Render `items` onto a copy of `img` at full resolution (what Save/Copy produce): the pixel
@@ -1246,15 +1236,8 @@ pub fn render(img: &Rgba, items: &[Item]) -> Result<Rgba> {
         paint_items(surface.dc, items, None, None, View::IDENTITY);
         let _ = GdiFlush();
     }
-    let src = surface
-        .pixels()
-        .ok_or_else(|| anyhow!("rendered surface has no pixels"))?;
-    let mut rgba = Vec::with_capacity(src.len());
-    for p in src.as_chunks::<4>().0 {
-        rgba.extend_from_slice(&[p[2], p[1], p[0], 255]);
-    }
-    Rgba::from_raw(img.width(), img.height(), rgba)
-        .ok_or_else(|| anyhow!("rendered buffer had the wrong size"))
+    crate::platform::gdi::rgba_from_surface(&surface, img.width(), img.height())
+        .ok_or_else(|| anyhow!("rendered surface has no pixels of the right size"))
 }
 
 /// What Save and Copy produce: [`render`] at full resolution, then cut to `crop` (clamped to the

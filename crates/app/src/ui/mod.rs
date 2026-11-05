@@ -4,6 +4,7 @@
 pub(crate) mod annotate;
 pub(crate) mod flyout;
 pub(crate) mod overlay;
+pub(crate) mod pin;
 pub(crate) mod recording;
 pub(crate) mod settings;
 pub(crate) mod tray;

@@ -49,6 +49,7 @@ pub enum Action {
     FlyoutAnnotate,
     /// The recording toolbar's tick: check whether the recording ended on its own.
     RecordPoll,
+    FlyoutPin,
 }
 
 impl Action {
@@ -76,6 +77,7 @@ impl Action {
             19 => RecordGif,
             20 => FlyoutAnnotate,
             21 => RecordPoll,
+            22 => FlyoutPin,
             _ => return None,
         })
     }
@@ -314,6 +316,15 @@ fn handle(action: Action) {
                 crate::ui::annotate::open(&path);
             }
         }
+        FlyoutPin => {
+            // Like Annotate: the pinned window takes over from the flyout, and is created
+            // outside the borrow.
+            if let Some(f) = with_app(|app| app.flyout.take()).flatten() {
+                let path = f.path().to_owned();
+                drop(f);
+                crate::ui::pin::open(&path);
+            }
+        }
         FlyoutDismiss => {
             with_app(|app| {
                 app.flyout = None;
@@ -359,6 +370,7 @@ mod tests {
             RecordGif,
             FlyoutAnnotate,
             RecordPoll,
+            FlyoutPin,
         ];
         for a in all {
             assert_eq!(Action::from_u32(a as u32), Some(a), "{a:?}");
