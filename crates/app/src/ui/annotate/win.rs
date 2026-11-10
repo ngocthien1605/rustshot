@@ -1,12 +1,12 @@
 //! The annotation editor window: a normal, resizable top-level window that shows a screenshot
-//! with a toolbar (Rectangle, Text, Arrow, Highlight, Pixelate; six colour swatches; three line
-//! thicknesses; Undo, Redo, Save, Copy). It runs on the main UI thread's message loop (like the
+//! under a two-row toolbar (the tools; then six colour swatches, three line thicknesses, Undo,
+//! Redo, Save, Copy). It runs on the main UI thread's message loop (like the
 //! flyout), so it needs no thread of its own.
 //!
 //! What you see is what gets saved: the canvas shows the screenshot with the pixel items
 //! (highlight, pixelate) applied by the same [`apply_pixel_layer`] the export uses, and one GDI
-//! routine ([`paint_items`]) draws the outlines, arrows and text both on screen and into the
-//! exported image.
+//! routine ([`paint_items`]) draws the outlines, ellipses, lines, arrows and text both on screen
+//! and into the exported image.
 
 use std::cell::RefCell;
 use std::ffi::c_void;
@@ -67,8 +67,15 @@ use super::model::{
 const CLASS_NAME: PCWSTR = w!("RustShotAnnotate");
 static REGISTER: Once = Once::new();
 
+/// The toolbar has two rows of buttons: the tools, then the style and the actions. One row of
+/// everything was 1060 px wide at 96 DPI before Ellipse and Line were added — more than a
+/// 1366-px laptop screen at 125 % can show.
+const ROWS: i32 = 2;
+/// Height of a toolbar button and the gap above each row (and below the last), at 96 DPI.
+const ROW_H: i32 = 28;
+const ROW_GAP: i32 = 6;
 /// Toolbar height and canvas margin at 96 DPI; scaled by the window's DPI (see `dpi`).
-const TOOLBAR_H: i32 = 40;
+const TOOLBAR_H: i32 = ROW_GAP + ROWS * (ROW_H + ROW_GAP);
 const MARGIN: i32 = 8;
 /// How far (screen px at 96 DPI) a click may miss an annotation, or a resize handle of the
 /// selected one, and still pick it.
@@ -77,59 +84,82 @@ const HIT_SLOP: i32 = 5;
 const HANDLE_HALF: i32 = 4;
 /// How dark the part outside a crop is shown (about 60 % black).
 const CROP_SHADE_ALPHA: u8 = 150;
-/// Toolbar buttons: id, label, gap before the button, width, extra style — lengths at 96 DPI;
-/// each button's x is the running sum ([`button_x`]). The tool buttons are radio buttons (their
-/// ids must stay consecutive, in [`Tool::ALL`] order); the swatches and thickness buttons are
-/// owner-drawn (`WM_DRAWITEM`), their labels only name them for screen readers.
-const BUTTONS: [(i32, PCWSTR, i32, i32, u32); 22] = [
-    (ID_TOOL0, w!("Select"), 8, 50, TOOL | WS_GROUP),
-    (ID_TOOL0 + 1, w!("Crop"), 4, 44, TOOL),
-    (ID_TOOL0 + 2, w!("Rectangle"), 4, 72, TOOL),
-    (ID_TOOL0 + 3, w!("Text"), 4, 44, TOOL),
-    (ID_TOOL0 + 4, w!("Arrow"), 4, 50, TOOL),
-    (ID_TOOL0 + 5, w!("Highlight"), 4, 64, TOOL),
-    (ID_TOOL0 + 6, w!("Pixelate"), 4, 60, TOOL),
-    (ID_TOOL0 + 7, w!("Black box"), 4, 66, TOOL),
-    (ID_TOOL0 + 8, w!("Step"), 4, 44, TOOL),
-    (ID_COLOR0, w!("Red"), 12, 26, BS_OWNERDRAW),
-    (ID_COLOR0 + 1, w!("Yellow"), 2, 26, BS_OWNERDRAW),
-    (ID_COLOR0 + 2, w!("Green"), 2, 26, BS_OWNERDRAW),
-    (ID_COLOR0 + 3, w!("Blue"), 2, 26, BS_OWNERDRAW),
-    (ID_COLOR0 + 4, w!("Black"), 2, 26, BS_OWNERDRAW),
-    (ID_COLOR0 + 5, w!("White"), 2, 26, BS_OWNERDRAW),
-    (ID_WIDTH0, w!("Thin"), 12, 30, BS_OWNERDRAW),
-    (ID_WIDTH0 + 1, w!("Medium"), 2, 30, BS_OWNERDRAW),
-    (ID_WIDTH0 + 2, w!("Thick"), 2, 30, BS_OWNERDRAW),
-    (ID_UNDO, w!("Undo"), 12, 52, 0),
-    (ID_REDO, w!("Redo"), 4, 52, 0),
-    (ID_SAVE, w!("Save"), 4, 52, 0),
-    (ID_COPY, w!("Copy"), 4, 52, 0),
+/// Toolbar buttons: id, label, gap before the button, width, extra style, row — lengths at
+/// 96 DPI; each button's x is the running sum along its row ([`button_x`]). The tool buttons are
+/// radio buttons (their ids must stay consecutive, in [`Tool::ALL`] order); the swatches and
+/// thickness buttons are owner-drawn (`WM_DRAWITEM`), their labels only name them for screen
+/// readers.
+const BUTTONS: [(i32, PCWSTR, i32, i32, u32, i32); 24] = [
+    (ID_TOOL0, w!("Select"), 8, 50, TOOL | WS_GROUP, 0),
+    (ID_TOOL0 + 1, w!("Crop"), 4, 44, TOOL, 0),
+    (ID_TOOL0 + 2, w!("Rectangle"), 4, 72, TOOL, 0),
+    (ID_TOOL0 + 3, w!("Ellipse"), 4, 56, TOOL, 0),
+    (ID_TOOL0 + 4, w!("Text"), 4, 44, TOOL, 0),
+    (ID_TOOL0 + 5, w!("Arrow"), 4, 50, TOOL, 0),
+    (ID_TOOL0 + 6, w!("Line"), 4, 44, TOOL, 0),
+    (ID_TOOL0 + 7, w!("Highlight"), 4, 64, TOOL, 0),
+    (ID_TOOL0 + 8, w!("Pixelate"), 4, 60, TOOL, 0),
+    (ID_TOOL0 + 9, w!("Black box"), 4, 66, TOOL, 0),
+    (ID_TOOL0 + 10, w!("Step"), 4, 44, TOOL, 0),
+    (ID_COLOR0, w!("Red"), 8, 26, BS_OWNERDRAW, 1),
+    (ID_COLOR0 + 1, w!("Yellow"), 2, 26, BS_OWNERDRAW, 1),
+    (ID_COLOR0 + 2, w!("Green"), 2, 26, BS_OWNERDRAW, 1),
+    (ID_COLOR0 + 3, w!("Blue"), 2, 26, BS_OWNERDRAW, 1),
+    (ID_COLOR0 + 4, w!("Black"), 2, 26, BS_OWNERDRAW, 1),
+    (ID_COLOR0 + 5, w!("White"), 2, 26, BS_OWNERDRAW, 1),
+    (ID_WIDTH0, w!("Thin"), 12, 30, BS_OWNERDRAW, 1),
+    (ID_WIDTH0 + 1, w!("Medium"), 2, 30, BS_OWNERDRAW, 1),
+    (ID_WIDTH0 + 2, w!("Thick"), 2, 30, BS_OWNERDRAW, 1),
+    (ID_UNDO, w!("Undo"), 12, 52, 0, 1),
+    (ID_REDO, w!("Redo"), 4, 52, 0, 1),
+    (ID_SAVE, w!("Save"), 4, 52, 0, 1),
+    (ID_COPY, w!("Copy"), 4, 52, 0, 1),
 ];
 
-/// Left edge of button `i` at 96 DPI: the gaps and widths of the buttons before it, plus its gap.
+/// Left edge of button `i` at 96 DPI: the gaps and widths of the buttons before it in its row,
+/// plus its gap.
 const fn button_x(i: usize) -> i32 {
     let mut x = 0;
     let mut k = 0;
     while k < i {
-        x += BUTTONS[k].2 + BUTTONS[k].3;
+        if BUTTONS[k].5 == BUTTONS[i].5 {
+            x += BUTTONS[k].2 + BUTTONS[k].3;
+        }
         k += 1;
     }
     x + BUTTONS[i].2
 }
 
-/// The narrowest client area that shows the whole toolbar, at 96 DPI.
+/// Top edge of button `i` at 96 DPI: its row.
+const fn button_y(i: usize) -> i32 {
+    ROW_GAP + BUTTONS[i].5 * (ROW_H + ROW_GAP)
+}
+
+/// The narrowest client area that shows the whole toolbar, at 96 DPI: its longest row.
 const TOOLBAR_W: i32 = {
-    let last = BUTTONS.len() - 1;
-    button_x(last) + BUTTONS[last].3 + MARGIN
+    let mut right = 0;
+    let mut i = 0;
+    while i < BUTTONS.len() {
+        let r = button_x(i) + BUTTONS[i].3;
+        if r > right {
+            right = r;
+        }
+        i += 1;
+    }
+    right + MARGIN
 };
+
+// The whole toolbar must stay within 1200 px at 96 DPI. It also has to fit a 1366-px screen at
+// 125 % (1092 px at 96 DPI, less the window frame), so the build fails well before that.
+const _: () = assert!(TOOLBAR_W <= 1060);
 
 /// First tool button; the tools follow in [`Tool::ALL`] order.
 const ID_TOOL0: i32 = 201;
 const ID_TOOL_LAST: i32 = ID_TOOL0 + Tool::ALL.len() as i32 - 1;
-const ID_UNDO: i32 = 210;
-const ID_REDO: i32 = 211;
-const ID_SAVE: i32 = 212;
-const ID_COPY: i32 = 213;
+const ID_UNDO: i32 = 240;
+const ID_REDO: i32 = 241;
+const ID_SAVE: i32 = 242;
+const ID_COPY: i32 = 243;
 /// Colour swatches, in [`Color::PALETTE`] order.
 const ID_COLOR0: i32 = 220;
 /// Thickness buttons, in [`Thickness::ALL`] order.
@@ -340,7 +370,7 @@ fn create_toolbar(parent: HWND) -> Result<()> {
     // SAFETY: standard BUTTON child creation; sizes and font are applied by `layout_toolbar`.
     unsafe {
         let hinstance = GetModuleHandleW(None).context("GetModuleHandleW")?;
-        for (id, label, _, _, extra) in BUTTONS {
+        for (id, label, _, _, extra, _) in BUTTONS {
             CreateWindowExW(
                 WINDOW_EX_STYLE(0),
                 w!("BUTTON"),
@@ -399,7 +429,7 @@ fn show_toolbar(hwnd: HWND, now: Shown) {
     // SAFETY: checks, enables and invalidates our own child buttons.
     unsafe {
         let _ = CheckRadioButton(hwnd, ID_TOOL0, ID_TOOL_LAST, tool_id);
-        for (id, _, _, _, _) in BUTTONS {
+        for (id, _, _, _, _, _) in BUTTONS {
             let enable = if color_of(id).is_some() {
                 now.colors
             } else if thickness_of(id).is_some() {
@@ -494,11 +524,18 @@ fn set_dpi(hwnd: HWND, dpi: u32) {
     let px = |v: i32| crate::platform::dpi::scale(v, dpi);
     // SAFETY: repositions and refonts our own child buttons.
     unsafe {
-        for (i, &(id, _, _, width, _)) in BUTTONS.iter().enumerate() {
+        for (i, &(id, _, _, width, _, _)) in BUTTONS.iter().enumerate() {
             let Ok(button) = GetDlgItem(Some(hwnd), id) else {
                 continue;
             };
-            let _ = MoveWindow(button, px(button_x(i)), px(6), px(width), px(28), true);
+            let _ = MoveWindow(
+                button,
+                px(button_x(i)),
+                px(button_y(i)),
+                px(width),
+                px(ROW_H),
+                true,
+            );
             if let Some(f) = font {
                 SendMessageW(
                     button,
@@ -996,6 +1033,8 @@ fn paint_items(
 fn paint_item(hdc: HDC, item: &Item, view: View) {
     match item {
         Item::Rect(r, style) => outline(hdc, *r, *style, view),
+        Item::Ellipse(r, style) => draw_ellipse(hdc, *r, *style, view),
+        Item::Line { from, to, style } => draw_line(hdc, *from, *to, *style, view),
         Item::Text { rect, text, style } => {
             outline(hdc, *rect, *style, view);
             draw_text(hdc, *rect, text, style.color, view);
@@ -1181,6 +1220,46 @@ fn outline(hdc: HDC, r: Rect, style: Style, view: View) {
         let _ = Rectangle(hdc, vr.left, vr.top, vr.right, vr.bottom);
         SelectObject(hdc, old_pen);
         SelectObject(hdc, old_brush);
+        let _ = DeleteObject(HGDIOBJ(pen.0));
+    }
+}
+
+/// An ellipse outline drawn just inside `r`, like [`outline`].
+fn draw_ellipse(hdc: HDC, r: Rect, style: Style, view: View) {
+    let width = view.px(style.thickness.px()).max(1);
+    let vr = view_rect(view, r);
+    // SAFETY: pen/brush selection and drawing on the DC we are given; both are restored and the
+    // pen deleted before returning.
+    unsafe {
+        let pen = CreatePen(PS_INSIDEFRAME, width, colorref(style.color));
+        let old_pen = SelectObject(hdc, HGDIOBJ(pen.0));
+        let old_brush = SelectObject(hdc, GetStockObject(HOLLOW_BRUSH));
+        let _ = Ellipse(hdc, vr.left, vr.top, vr.right, vr.bottom);
+        SelectObject(hdc, old_pen);
+        SelectObject(hdc, old_brush);
+        let _ = DeleteObject(HGDIOBJ(pen.0));
+    }
+}
+
+/// A straight line from `from` to `to`: an arrow's shaft without the head.
+fn draw_line(hdc: HDC, from: Point, to: Point, style: Style, view: View) {
+    let at = |p: Point| POINT {
+        x: view.ox + view.px(p.x),
+        y: view.oy + view.px(p.y),
+    };
+    let (a, b) = (at(from), at(to));
+    // SAFETY: line drawing on the DC we are given; the pen is deselected and deleted before
+    // returning.
+    unsafe {
+        let pen = CreatePen(
+            PS_SOLID,
+            view.px(style.thickness.px()).max(1),
+            colorref(style.color),
+        );
+        let old_pen = SelectObject(hdc, HGDIOBJ(pen.0));
+        let _ = MoveToEx(hdc, a.x, a.y, None);
+        let _ = LineTo(hdc, b.x, b.y);
+        SelectObject(hdc, old_pen);
         let _ = DeleteObject(HGDIOBJ(pen.0));
     }
 }
@@ -1765,15 +1844,42 @@ mod tests {
 
     #[test]
     fn toolbar_buttons_do_not_overlap_and_fit_the_minimum_width() {
-        let mut spans: Vec<(i32, i32)> = (0..BUTTONS.len())
-            .map(|i| (button_x(i), button_x(i) + BUTTONS[i].3))
-            .collect();
-        spans.sort_unstable();
-        for w in spans.windows(2) {
-            assert!(w[0].1 <= w[1].0, "{:?} overlaps {:?}", w[0], w[1]);
+        // Row by row: buttons in different rows share x positions, never a row.
+        for row in 0..ROWS {
+            let mut spans: Vec<(i32, i32)> = (0..BUTTONS.len())
+                .filter(|&i| BUTTONS[i].5 == row)
+                .map(|i| (button_x(i), button_x(i) + BUTTONS[i].3))
+                .collect();
+            assert!(!spans.is_empty(), "row {row} has no buttons");
+            spans.sort_unstable();
+            for w in spans.windows(2) {
+                assert!(
+                    w[0].1 <= w[1].0,
+                    "row {row}: {:?} overlaps {:?}",
+                    w[0],
+                    w[1]
+                );
+            }
+            let right = spans.last().map(|s| s.1).unwrap();
+            assert!(
+                right + MARGIN <= TOOLBAR_W,
+                "row {row} of the toolbar is {right} px wide"
+            );
         }
-        let right = spans.last().map(|s| s.1).unwrap();
-        assert!(right + MARGIN <= TOOLBAR_W, "toolbar is {right} px wide");
+    }
+
+    #[test]
+    fn toolbar_rows_stack_inside_the_toolbar_and_it_fits_a_small_laptop() {
+        for (i, b) in BUTTONS.iter().enumerate() {
+            assert!((0..ROWS).contains(&b.5), "button {i} is in row {}", b.5);
+            assert!(button_y(i) >= ROW_GAP, "button {i}");
+            assert!(button_y(i) + ROW_H + ROW_GAP <= TOOLBAR_H, "button {i}");
+        }
+        assert_eq!(button_y(0) + ROW_H + ROW_GAP, button_y(BUTTONS.len() - 1));
+        // The tools share the first row; style and actions the second.
+        for b in BUTTONS {
+            assert_eq!(b.5 == 0, tool_of(b.0).is_some(), "id {}", b.0);
+        }
     }
 
     #[test]
@@ -2031,5 +2137,106 @@ mod tests {
             assert_eq!(px(&out, x, y), [255, 255, 255, 255], "({x},{y})");
         }
         assert_eq!(px(&out, 10, 10), [0, 0, 0, 255], "the corner pixel itself");
+    }
+
+    #[test]
+    fn ellipse_is_an_outline_inside_its_box_in_its_colour_and_thickness() {
+        // 60 × 40 box: the ellipse touches the middle of each side.
+        let r = Rect::new(10, 10, 60, 40);
+        let out = render(&white(120, 80), &[Item::Ellipse(r, Style::DEFAULT)]).unwrap();
+        assert_eq!(px(&out, 11, 30), [255, 0, 0, 255], "leftmost point");
+        assert_eq!(px(&out, 68, 30), [255, 0, 0, 255], "rightmost point");
+        assert_eq!(px(&out, 40, 11), [255, 0, 0, 255], "top");
+        assert_eq!(px(&out, 40, 48), [255, 0, 0, 255], "bottom");
+        assert_eq!(px(&out, 40, 30), [255, 255, 255, 255], "hollow middle");
+        assert_eq!(
+            px(&out, 16, 30),
+            [255, 255, 255, 255],
+            "inside the 3-px line"
+        );
+        assert_eq!(px(&out, 12, 12), [255, 255, 255, 255], "corner of the box");
+        assert_eq!(px(&out, 67, 47), [255, 255, 255, 255], "opposite corner");
+        // Nothing is drawn outside the box.
+        for y in 0..80 {
+            for x in 0..120 {
+                if !r.contains(Point::new(x as i32, y as i32)) {
+                    assert_eq!(px(&out, x, y), [255, 255, 255, 255], "({x},{y})");
+                }
+            }
+        }
+
+        let blue_thick = Style {
+            color: Color::Blue,
+            thickness: super::super::model::Thickness::Thick,
+        };
+        let out = render(&white(120, 80), &[Item::Ellipse(r, blue_thick)]).unwrap();
+        let [b0, b1, b2] = Color::Blue.rgb();
+        assert_eq!(px(&out, 14, 30), [b0, b1, b2, 255], "6 px of blue");
+        assert_eq!(px(&out, 18, 30), [255, 255, 255, 255], "then the inside");
+    }
+
+    #[test]
+    fn line_is_a_straight_stroke_without_a_head() {
+        let line = Item::Line {
+            from: Point::new(5, 20),
+            to: Point::new(60, 20),
+            style: Style::DEFAULT,
+        };
+        let out = render(&white(80, 40), &[line]).unwrap();
+        for x in [6, 20, 40, 58] {
+            assert_eq!(px(&out, x, 20), [255, 0, 0, 255], "on the line at x = {x}");
+        }
+        assert_eq!(px(&out, 30, 19), [255, 0, 0, 255], "3 px wide");
+        assert_eq!(px(&out, 30, 21), [255, 0, 0, 255], "3 px wide");
+        assert_eq!(px(&out, 30, 23), [255, 255, 255, 255], "off the line");
+        assert_eq!(px(&out, 30, 17), [255, 255, 255, 255], "off the line");
+        assert_eq!(px(&out, 66, 20), [255, 255, 255, 255], "past the end");
+        // Where an arrow would have its head (see `arrow_is_drawn_red_with_a_filled_head`).
+        assert_eq!(px(&out, 50, 24), [255, 255, 255, 255], "no head");
+
+        let green_thin = Style {
+            color: Color::Green,
+            thickness: super::super::model::Thickness::Thin,
+        };
+        let diagonal = Item::Line {
+            from: Point::new(10, 5),
+            to: Point::new(40, 35),
+            style: green_thin,
+        };
+        let out = render(&white(80, 40), &[diagonal]).unwrap();
+        let [g0, g1, g2] = Color::Green.rgb();
+        assert_eq!(
+            px(&out, 25, 20),
+            [g0, g1, g2, 255],
+            "the middle of the diagonal"
+        );
+        assert_eq!(px(&out, 40, 5), [255, 255, 255, 255], "the other diagonal");
+    }
+
+    #[test]
+    fn ellipse_and_line_are_cut_by_the_crop_like_other_shapes() {
+        let items = [
+            Item::Ellipse(Rect::new(10, 10, 60, 40), Style::DEFAULT),
+            Item::Line {
+                from: Point::new(0, 60),
+                to: Point::new(99, 60),
+                style: Style::DEFAULT,
+            },
+        ];
+        let out = export(&white(100, 80), &items, Some(Rect::new(40, 5, 50, 70))).unwrap();
+        assert_eq!((out.width(), out.height()), (50, 70));
+        // (x, y) in the crop is (x + 40, y + 5) in the image.
+        assert_eq!(
+            px(&out, 0, 6),
+            [255, 0, 0, 255],
+            "top of the ellipse at x = 40"
+        );
+        assert_eq!(px(&out, 28, 25), [255, 0, 0, 255], "its rightmost point");
+        assert_eq!(
+            px(&out, 0, 55),
+            [255, 0, 0, 255],
+            "the line, at the crop's left edge"
+        );
+        assert_eq!(px(&out, 49, 55), [255, 0, 0, 255], "and at its right edge");
     }
 }

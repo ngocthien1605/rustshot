@@ -6,7 +6,7 @@
 //!
 //! Items come in two layers. *Pixel* items ([`Item::Pixelate`], [`Item::Highlight`]) change the
 //! screenshot's pixels themselves ([`apply_pixel_layer`]); the window then draws the *vector*
-//! items (outlines, arrows, text) on top. Save and Copy export both layers, so a redaction is
+//! items (outlines, ellipses, lines, arrows, text) on top. Save and Copy export both layers, so a redaction is
 //! part of the file, not an overlay that could be lifted off.
 //!
 //! Each tool remembers its own [`Style`] (colour from a small fixed [`Color`] palette, and a
@@ -137,10 +137,14 @@ pub enum Tool {
     Crop,
     /// Draw a rectangle outline.
     Rect,
+    /// Drag a box; an ellipse outline is drawn inside it.
+    Ellipse,
     /// Draw a rectangle, then type text inside it.
     Text,
     /// Drag from the tail to the point of an arrow.
     Arrow,
+    /// Drag from one end to the other of a straight line (an arrow without a head).
+    Line,
     /// Drag a translucent highlighter box over the screenshot.
     Highlight,
     /// Drag a rectangle whose pixels are pixelated (irreversibly) in the saved/copied image.
@@ -153,12 +157,14 @@ pub enum Tool {
 }
 
 impl Tool {
-    pub const ALL: [Tool; 9] = [
+    pub const ALL: [Tool; 11] = [
         Tool::Select,
         Tool::Crop,
         Tool::Rect,
+        Tool::Ellipse,
         Tool::Text,
         Tool::Arrow,
+        Tool::Line,
         Tool::Highlight,
         Tool::Pixelate,
         Tool::BlackBox,
@@ -170,12 +176,14 @@ impl Tool {
             Tool::Select => 0,
             Tool::Crop => 1,
             Tool::Rect => 2,
-            Tool::Text => 3,
-            Tool::Arrow => 4,
-            Tool::Highlight => 5,
-            Tool::Pixelate => 6,
-            Tool::BlackBox => 7,
-            Tool::Step => 8,
+            Tool::Ellipse => 3,
+            Tool::Text => 4,
+            Tool::Arrow => 5,
+            Tool::Line => 6,
+            Tool::Highlight => 7,
+            Tool::Pixelate => 8,
+            Tool::BlackBox => 9,
+            Tool::Step => 10,
         }
     }
 
@@ -202,7 +210,10 @@ impl Tool {
     /// Whether the thickness applies (highlight, pixelate and black box are filled areas; for a
     /// step marker it sets the size).
     pub fn uses_thickness(self) -> bool {
-        matches!(self, Tool::Rect | Tool::Text | Tool::Arrow | Tool::Step)
+        matches!(
+            self,
+            Tool::Rect | Tool::Ellipse | Tool::Text | Tool::Arrow | Tool::Line | Tool::Step
+        )
     }
 }
 
@@ -210,6 +221,8 @@ impl Tool {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Item {
     Rect(Rect, Style),
+    /// An ellipse outline inscribed in the rectangle.
+    Ellipse(Rect, Style),
     /// Text in the style's colour inside a border of the style's thickness.
     Text {
         rect: Rect,
@@ -218,6 +231,12 @@ pub enum Item {
     },
     /// An arrow whose point is at `to`.
     Arrow {
+        from: Point,
+        to: Point,
+        style: Style,
+    },
+    /// A straight line between two points, without a head.
+    Line {
         from: Point,
         to: Point,
         style: Style,
@@ -251,8 +270,10 @@ impl Item {
     pub fn style(&self) -> Option<Style> {
         match self {
             Item::Rect(_, style)
+            | Item::Ellipse(_, style)
             | Item::Text { style, .. }
             | Item::Arrow { style, .. }
+            | Item::Line { style, .. }
             | Item::Step { style, .. } => Some(*style),
             Item::Highlight(_, color) => Some(Style {
                 color: *color,
@@ -269,7 +290,12 @@ impl Item {
     pub fn uses_thickness(&self) -> bool {
         matches!(
             self,
-            Item::Rect(..) | Item::Text { .. } | Item::Arrow { .. } | Item::Step { .. }
+            Item::Rect(..)
+                | Item::Ellipse(..)
+                | Item::Text { .. }
+                | Item::Arrow { .. }
+                | Item::Line { .. }
+                | Item::Step { .. }
         )
     }
 
@@ -278,8 +304,10 @@ impl Item {
         let mut item = self.clone();
         match &mut item {
             Item::Rect(_, style)
+            | Item::Ellipse(_, style)
             | Item::Text { style, .. }
             | Item::Arrow { style, .. }
+            | Item::Line { style, .. }
             | Item::Step { style, .. } => style.color = color,
             Item::Highlight(_, c) => *c = color,
             Item::Pixelate(_) | Item::BlackBox(_) => {}
@@ -291,8 +319,10 @@ impl Item {
     fn rethickened(&self, thickness: Thickness) -> Item {
         let mut item = self.clone();
         if let Item::Rect(_, style)
+        | Item::Ellipse(_, style)
         | Item::Text { style, .. }
         | Item::Arrow { style, .. }
+        | Item::Line { style, .. }
         | Item::Step { style, .. } = &mut item
         {
             style.thickness = thickness;
@@ -301,7 +331,7 @@ impl Item {
     }
 
     /// The area the item covers (the selection frame goes around it): its rectangle, the box
-    /// spanned by an arrow's ends, a step marker's circle.
+    /// spanned by the ends of an arrow or a line, a step marker's circle.
     pub fn bounds(&self) -> Rect {
         match self {
             Item::Step { at, style, .. } => {
@@ -317,11 +347,14 @@ impl Item {
     fn anchor(&self) -> Rect {
         match self {
             Item::Rect(r, _)
+            | Item::Ellipse(r, _)
             | Item::Text { rect: r, .. }
             | Item::Highlight(r, _)
             | Item::Pixelate(r)
             | Item::BlackBox(r) => *r,
-            Item::Arrow { from, to, .. } => Rect::from_points(*from, *to),
+            Item::Arrow { from, to, .. } | Item::Line { from, to, .. } => {
+                Rect::from_points(*from, *to)
+            }
             Item::Step { at, .. } => Rect::new(at.x, at.y, 0, 0),
         }
     }
@@ -330,18 +363,19 @@ impl Item {
     fn box_rect(&self) -> Option<Rect> {
         match self {
             Item::Rect(r, _)
+            | Item::Ellipse(r, _)
             | Item::Text { rect: r, .. }
             | Item::Highlight(r, _)
             | Item::Pixelate(r)
             | Item::BlackBox(r) => Some(*r),
-            Item::Arrow { .. } | Item::Step { .. } => None,
+            Item::Arrow { .. } | Item::Line { .. } | Item::Step { .. } => None,
         }
     }
 
     /// The two ends of a line-like item (resized by a handle on each), if it is one.
     fn ends(&self) -> Option<(Point, Point)> {
         match self {
-            Item::Arrow { from, to, .. } => Some((*from, *to)),
+            Item::Arrow { from, to, .. } | Item::Line { from, to, .. } => Some((*from, *to)),
             _ => None,
         }
     }
@@ -350,6 +384,7 @@ impl Item {
     fn with_box(&self, new: Rect) -> Item {
         let mut item = self.clone();
         if let Item::Rect(r, _)
+        | Item::Ellipse(r, _)
         | Item::Text { rect: r, .. }
         | Item::Highlight(r, _)
         | Item::Pixelate(r)
@@ -363,14 +398,14 @@ impl Item {
     /// The item with its two ends replaced (unchanged when it has none).
     fn with_ends(&self, a: Point, b: Point) -> Item {
         let mut item = self.clone();
-        if let Item::Arrow { from, to, .. } = &mut item {
+        if let Item::Arrow { from, to, .. } | Item::Line { from, to, .. } = &mut item {
             (*from, *to) = (a, b);
         }
         item
     }
 
     /// Where the item can be grabbed to resize it: the corners and edge midpoints of a box, the
-    /// two ends of an arrow. A step marker has none (its size comes from the line thickness).
+    /// two ends of an arrow or a line. A step marker has none (its size comes from the line thickness).
     pub fn handles(&self) -> Vec<(Handle, Point)> {
         if let Some(r) = self.box_rect() {
             Handle::BOX.iter().map(|h| (*h, h.on_box(r))).collect()
@@ -387,6 +422,12 @@ impl Item {
         let mp = |p: &Point| Point::new(p.x + dx, p.y + dy);
         match self {
             Item::Rect(r, style) => Item::Rect(mv(r), *style),
+            Item::Ellipse(r, style) => Item::Ellipse(mv(r), *style),
+            Item::Line { from, to, style } => Item::Line {
+                from: mp(from),
+                to: mp(to),
+                style: *style,
+            },
             Item::Text { rect, text, style } => Item::Text {
                 rect: mv(rect),
                 text: text.clone(),
@@ -409,8 +450,9 @@ impl Item {
     }
 
     /// Whether a click at `p` picks this item, allowing `slop` image pixels of slack. Filled
-    /// items and text boxes are picked anywhere inside; a rectangle outline only near its edge
-    /// (so whatever is inside it can still be clicked); an arrow near its shaft or head.
+    /// items and text boxes are picked anywhere inside; a rectangle or ellipse outline only near
+    /// its edge (so whatever is inside it can still be clicked); an arrow near its shaft or
+    /// head; a line near the line.
     pub fn hit(&self, p: Point, slop: i32) -> bool {
         let grow =
             |r: &Rect, d: i32| Rect::new(r.x - d, r.y - d, r.width + 2 * d, r.height + 2 * d);
@@ -418,6 +460,12 @@ impl Item {
             Item::Rect(r, style) => {
                 let inner = grow(r, -(style.thickness.px() + slop));
                 grow(r, slop).contains(p) && (inner.is_empty() || !inner.contains(p))
+            }
+            Item::Ellipse(r, style) => {
+                in_ellipse(*r, slop, p) && !in_ellipse(*r, -(style.thickness.px() + slop), p)
+            }
+            Item::Line { from, to, style } => {
+                dist_to_segment(p, *from, *to) <= f64::from(slop + style.thickness.px() / 2 + 1)
             }
             Item::Text { rect: r, .. }
             | Item::Highlight(r, _)
@@ -435,6 +483,24 @@ impl Item {
             }
         }
     }
+}
+
+/// Whether `p` is inside the ellipse inscribed in `r` grown by `d` on every side (shrunk for a
+/// negative `d`; an ellipse shrunk to nothing contains no point).
+fn in_ellipse(r: Rect, d: i32, p: Point) -> bool {
+    let (a, b) = (
+        f64::from(r.width) / 2.0 + f64::from(d),
+        f64::from(r.height) / 2.0 + f64::from(d),
+    );
+    if a <= 0.0 || b <= 0.0 {
+        return false;
+    }
+    let (cx, cy) = (
+        f64::from(r.x) + f64::from(r.width) / 2.0,
+        f64::from(r.y) + f64::from(r.height) / 2.0,
+    );
+    let (nx, ny) = ((f64::from(p.x) - cx) / a, (f64::from(p.y) - cy) / b);
+    nx * nx + ny * ny <= 1.0
 }
 
 fn dist(a: Point, b: Point) -> f64 {
@@ -464,9 +530,9 @@ pub enum Handle {
     Bottom,
     BottomLeft,
     Left,
-    /// The tail of an arrow.
+    /// The tail of an arrow; the end of a line where its drag started.
     Start,
-    /// The point of an arrow.
+    /// The point of an arrow; the other end of a line.
     End,
 }
 
@@ -626,14 +692,16 @@ pub enum Shortcut {
     Thicker,
 }
 
-/// The shortcut for a typed character: `S` `C` `R` `T` `A` `H` `P` `B` `N` pick a tool, `1`–`6` a colour,
-/// `[` / `]` step the thickness. Case-insensitive. Characters (not key codes) are matched, so
+/// The shortcut for a typed character: `S` `C` `R` `E` `T` `A` `L` `H` `P` `B` `N` pick a tool,
+/// `1`–`6` a colour, `[` / `]` step the thickness. Case-insensitive. Characters (not key codes) are matched, so
 /// the keys work the same on any keyboard layout.
 pub fn shortcut(c: char) -> Option<Shortcut> {
     Some(match c.to_ascii_lowercase() {
         's' => Shortcut::Tool(Tool::Select),
         'c' => Shortcut::Tool(Tool::Crop),
         'r' => Shortcut::Tool(Tool::Rect),
+        'e' => Shortcut::Tool(Tool::Ellipse),
+        'l' => Shortcut::Tool(Tool::Line),
         't' => Shortcut::Tool(Tool::Text),
         'a' => Shortcut::Tool(Tool::Arrow),
         'h' => Shortcut::Tool(Tool::Highlight),
@@ -946,7 +1014,13 @@ impl Editor {
         Some(match self.tool {
             Tool::Select | Tool::Crop => return None,
             Tool::Rect | Tool::Text => Item::Rect(r, style),
+            Tool::Ellipse => Item::Ellipse(r, style),
             Tool::Arrow => Item::Arrow {
+                from: a,
+                to: b,
+                style,
+            },
+            Tool::Line => Item::Line {
                 from: a,
                 to: b,
                 style,
@@ -1076,7 +1150,8 @@ impl Editor {
 
     /// Finish the drag. A big-enough shape is committed (or, for the Text tool, becomes a text
     /// box awaiting typing); a tiny one — an accidental click — is discarded. Boxes need
-    /// [`MIN_SIZE`] on both axes, an arrow needs that length (a level arrow has no height). A
+    /// [`MIN_SIZE`] on both axes, an arrow or a line needs that length (a level one has no
+    /// height). A
     /// move that changed something becomes one undo step.
     pub fn on_up(&mut self, p: Point) {
         self.on_move(p);
@@ -1114,12 +1189,13 @@ impl Editor {
             });
             return;
         }
-        if self.tool == Tool::Arrow {
+        if matches!(self.tool, Tool::Arrow | Tool::Line) {
             if arrow_long_enough(a, b) {
-                self.push(Item::Arrow {
-                    from: a,
-                    to: b,
-                    style,
+                let (from, to) = (a, b);
+                self.push(if self.tool == Tool::Arrow {
+                    Item::Arrow { from, to, style }
+                } else {
+                    Item::Line { from, to, style }
                 });
             }
             return;
@@ -1130,10 +1206,11 @@ impl Editor {
         }
         match self.tool {
             Tool::Rect => self.push(Item::Rect(r, style)),
+            Tool::Ellipse => self.push(Item::Ellipse(r, style)),
             Tool::Highlight => self.push(Item::Highlight(r, style.color)),
             Tool::Pixelate => self.push(Item::Pixelate(r)),
             Tool::BlackBox => self.push(Item::BlackBox(r)),
-            Tool::Arrow | Tool::Select | Tool::Step | Tool::Crop => {} // handled above
+            Tool::Arrow | Tool::Line | Tool::Select | Tool::Step | Tool::Crop => {} // handled above
             Tool::Text => {
                 self.typing = Some(Typing {
                     rect: r,
@@ -1324,13 +1401,18 @@ pub fn apply_pixel_layer(img: &Rgba, items: &[Item]) -> Rgba {
             Item::Highlight(r, color) => {
                 imaging::blend_rect_in_place(&mut out, *r, color.rgb(), HIGHLIGHT_ALPHA)
             }
-            Item::Rect(..) | Item::Text { .. } | Item::Arrow { .. } | Item::Step { .. } => {}
+            Item::Rect(..)
+            | Item::Ellipse(..)
+            | Item::Text { .. }
+            | Item::Arrow { .. }
+            | Item::Line { .. }
+            | Item::Step { .. } => {}
         }
     }
     out
 }
 
-/// An arrow counts once it is at least [`MIN_SIZE`] long, in any direction.
+/// An arrow (or a line) counts once it is at least [`MIN_SIZE`] long, in any direction.
 pub fn arrow_long_enough(from: Point, to: Point) -> bool {
     let (dx, dy) = (i64::from(to.x - from.x), i64::from(to.y - from.y));
     dx * dx + dy * dy >= i64::from(MIN_SIZE) * i64::from(MIN_SIZE)
@@ -3308,5 +3390,294 @@ mod tests {
                 "tail, {to:?}"
             );
         }
+    }
+
+    #[test]
+    fn tool_order_matches_the_style_slots() {
+        for (i, tool) in Tool::ALL.into_iter().enumerate() {
+            assert_eq!(tool.index(), i, "{tool:?}");
+        }
+    }
+
+    #[test]
+    fn ellipse_and_line_keys_and_defaults() {
+        assert_eq!(shortcut('e'), Some(Shortcut::Tool(Tool::Ellipse)));
+        assert_eq!(shortcut('E'), Some(Shortcut::Tool(Tool::Ellipse)));
+        assert_eq!(shortcut('l'), Some(Shortcut::Tool(Tool::Line)));
+        assert_eq!(shortcut('L'), Some(Shortcut::Tool(Tool::Line)));
+        for tool in [Tool::Ellipse, Tool::Line] {
+            assert_eq!(
+                tool.default_style(),
+                Style::DEFAULT,
+                "{tool:?}: red, medium"
+            );
+            assert!(tool.uses_color() && tool.uses_thickness(), "{tool:?}");
+            let mut e = Editor::new(200, 100);
+            e.set_tool(tool);
+            assert_eq!(e.style(), Style::DEFAULT);
+            assert!(e.color_enabled() && e.thickness_enabled());
+        }
+        // Every tool key is its own.
+        let keys = ['s', 'c', 'r', 'e', 't', 'a', 'l', 'h', 'p', 'b', 'n'];
+        let mut tools: Vec<Tool> = Vec::new();
+        for k in keys {
+            let Some(Shortcut::Tool(t)) = shortcut(k) else {
+                panic!("{k:?} is not a tool key");
+            };
+            assert!(!tools.contains(&t), "{k:?} repeats {t:?}");
+            tools.push(t);
+        }
+        assert_eq!(tools.len(), Tool::ALL.len(), "one key per tool");
+    }
+
+    #[test]
+    fn ellipse_tool_commits_a_normalized_clamped_box_with_the_min_size_rule() {
+        let mut e = Editor::new(200, 100);
+        e.set_tool(Tool::Ellipse);
+        drag(&mut e, (10, 10), (10 + MIN_SIZE - 1, 80)); // too narrow
+        assert!(e.items().is_empty());
+        drag(&mut e, (150, 90), (-20, 30)); // up-left, past the edge
+        assert_eq!(
+            e.items(),
+            &[Item::Ellipse(Rect::new(0, 30, 150, 60), Style::DEFAULT)]
+        );
+        assert!(!e.items()[0].is_pixel(), "a vector item, drawn on top");
+        assert!(e.undo());
+        assert!(e.items().is_empty());
+        assert!(e.redo());
+        assert_eq!(e.items().len(), 1);
+    }
+
+    #[test]
+    fn line_tool_keeps_its_ends_and_follows_the_length_rule() {
+        let mut e = Editor::new(200, 100);
+        e.set_tool(Tool::Line);
+        drag(&mut e, (50, 50), (52, 53)); // a click
+        assert!(e.items().is_empty());
+        drag(&mut e, (150, 80), (40, 80)); // level, right to left: no height, still a line
+        assert_eq!(
+            e.items(),
+            &[Item::Line {
+                from: Point::new(150, 80),
+                to: Point::new(40, 80),
+                style: Style::DEFAULT,
+            }]
+        );
+        drag(&mut e, (10, 10), (500, -40)); // clamped to the image
+        assert_eq!(
+            e.items()[1],
+            Item::Line {
+                from: Point::new(10, 10),
+                to: Point::new(199, 0),
+                style: Style::DEFAULT,
+            }
+        );
+        assert!(e.undo());
+        assert_eq!(e.items().len(), 1);
+        e.on_down(Point::new(10, 10));
+        e.on_move(Point::new(90, 90));
+        assert!(!e.undo(), "cancels the line being drawn");
+        assert_eq!(e.items().len(), 1);
+    }
+
+    #[test]
+    fn ellipse_and_line_are_previewed_while_dragging() {
+        let green_thin = Style {
+            color: Color::Green,
+            thickness: Thickness::Thin,
+        };
+        let mut e = Editor::new(200, 100);
+        e.set_tool(Tool::Ellipse);
+        e.set_color(Color::Green);
+        e.set_thickness(Thickness::Thin);
+        e.on_down(Point::new(60, 50));
+        e.on_move(Point::new(20, 10));
+        assert_eq!(
+            e.preview(),
+            Some(Item::Ellipse(Rect::new(20, 10, 40, 40), green_thin))
+        );
+        e.on_up(Point::new(20, 10));
+        assert_eq!(e.preview(), None);
+        assert_eq!(
+            e.items(),
+            &[Item::Ellipse(Rect::new(20, 10, 40, 40), green_thin)]
+        );
+
+        e.set_tool(Tool::Line);
+        assert_eq!(e.style(), Style::DEFAULT, "the line tool has its own style");
+        e.on_down(Point::new(60, 50));
+        e.on_move(Point::new(20, 10));
+        assert_eq!(
+            e.preview(),
+            Some(Item::Line {
+                from: Point::new(60, 50),
+                to: Point::new(20, 10),
+                style: Style::DEFAULT,
+            })
+        );
+        e.on_escape();
+        e.set_tool(Tool::Ellipse);
+        assert_eq!(
+            e.style(),
+            green_thin,
+            "and the ellipse tool remembers its own"
+        );
+    }
+
+    #[test]
+    fn an_ellipse_is_picked_near_its_outline_only() {
+        // 100 × 60, centred on (100, 50): the outline passes through (50,50) and (100,20).
+        let ellipse = Item::Ellipse(Rect::new(50, 20, 100, 60), Style::DEFAULT);
+        let hit = |x: i32, y: i32| ellipse.hit(Point::new(x, y), 3);
+        assert!(hit(50, 50), "leftmost point");
+        assert!(hit(100, 20), "top");
+        assert!(hit(149, 50) && hit(100, 79));
+        assert!(hit(52, 50), "on the 3-px line");
+        assert!(hit(47, 50), "3 px outside: within the slack");
+        assert!(!hit(44, 50), "6 px outside");
+        assert!(!hit(100, 50), "the middle is hollow");
+        assert!(!hit(70, 50), "well inside");
+        assert!(!hit(52, 22), "the corner of its box is outside the ellipse");
+        // What is inside stays clickable.
+        let mut e = Editor::new(200, 100);
+        e.set_tool(Tool::BlackBox);
+        drag(&mut e, (90, 40), (110, 60));
+        e.set_tool(Tool::Ellipse);
+        drag(&mut e, (50, 20), (150, 80));
+        e.set_tool(Tool::Select);
+        assert_eq!(e.hit_test(Point::new(100, 50)), Some(0), "the box inside");
+        assert_eq!(
+            e.hit_test(Point::new(50, 50)),
+            Some(1),
+            "the ellipse itself"
+        );
+        // A small ellipse has no hollow middle left to miss.
+        let dot = Item::Ellipse(Rect::new(10, 10, 8, 8), Style::DEFAULT);
+        assert!(dot.hit(Point::new(14, 14), 3));
+    }
+
+    #[test]
+    fn a_line_is_picked_near_the_segment_only() {
+        let line = Item::Line {
+            from: Point::new(20, 50),
+            to: Point::new(120, 50),
+            style: Style::DEFAULT,
+        };
+        let hit = |x: i32, y: i32| line.hit(Point::new(x, y), 2);
+        assert!(hit(60, 50) && hit(60, 53), "on and beside it");
+        assert!(!hit(60, 56));
+        assert!(hit(122, 50), "just past the end");
+        assert!(!hit(126, 50));
+        // No head: where an arrow's barb would be picked, a line is not.
+        assert!(!hit(110, 56));
+    }
+
+    #[test]
+    fn ellipse_and_line_move_restyle_and_delete_like_the_other_shapes() {
+        let mut e = selected_item(Tool::Ellipse, (20, 20), (80, 60), (29, 26));
+        e.on_down(Point::new(29, 26)); // on the outline, clear of the handles
+        e.on_up(Point::new(500, 500)); // moved, stopping at the image edge
+        assert_eq!(
+            e.items()[0],
+            Item::Ellipse(Rect::new(139, 59, 60, 40), Style::DEFAULT)
+        );
+        assert!(e.color_enabled() && e.thickness_enabled());
+        e.set_color(Color::Blue);
+        e.set_thickness(Thickness::Thick);
+        let blue_thick = Style {
+            color: Color::Blue,
+            thickness: Thickness::Thick,
+        };
+        assert_eq!(
+            e.items()[0],
+            Item::Ellipse(Rect::new(139, 59, 60, 40), blue_thick)
+        );
+        assert_eq!(e.style(), blue_thick, "the toolbar shows the item's style");
+        assert!(e.delete_selected());
+        assert!(e.items().is_empty());
+        assert!(e.undo() && e.undo() && e.undo() && e.undo());
+        assert_eq!(
+            e.items(),
+            &[Item::Ellipse(Rect::new(20, 20, 60, 40), Style::DEFAULT)],
+            "delete, two restyles, the move: one step each"
+        );
+
+        let mut e = selected_item(Tool::Line, (20, 20), (80, 60), (50, 40));
+        e.on_down(Point::new(50, 40));
+        e.on_up(Point::new(60, 30));
+        let moved = Item::Line {
+            from: Point::new(30, 10),
+            to: Point::new(90, 50),
+            style: Style::DEFAULT,
+        };
+        assert_eq!(e.items()[0], moved);
+        assert_eq!(moved.bounds(), Rect::new(30, 10, 60, 40));
+        e.set_color(Color::Yellow);
+        assert_eq!(e.items()[0].style().map(|s| s.color), Some(Color::Yellow));
+        assert!(e.delete_selected());
+        assert!(e.undo());
+        assert_eq!(e.items().len(), 1);
+    }
+
+    #[test]
+    fn ellipse_and_line_are_resized_by_their_handles() {
+        let ellipse = Item::Ellipse(Rect::new(40, 20, 80, 50), Style::DEFAULT);
+        assert_eq!(ellipse.handles().len(), 8);
+        assert_eq!(
+            resized(&ellipse, Handle::BottomRight, Point::new(150, 90), 200, 100),
+            Item::Ellipse(Rect::new(40, 20, 110, 70), Style::DEFAULT)
+        );
+        assert_eq!(
+            resized(&ellipse, Handle::Left, Point::new(170, 0), 200, 100).bounds(),
+            Rect::new(120, 20, 50, 50),
+            "flips"
+        );
+        assert_eq!(
+            resized(&ellipse, Handle::Top, Point::new(0, 68), 200, 100).bounds(),
+            Rect::new(40, 70 - MIN_SIZE, 80, MIN_SIZE)
+        );
+
+        let mut e = selected_item(Tool::Line, (20, 50), (120, 50), (70, 50));
+        assert_eq!(
+            e.handles(),
+            vec![
+                (Handle::Start, Point::new(20, 50)),
+                (Handle::End, Point::new(120, 50)),
+            ]
+        );
+        assert_eq!(
+            e.resize_cursor(Point::new(120, 50)),
+            Some(ResizeCursor::WestEast)
+        );
+        e.on_down(Point::new(120, 50));
+        e.on_up(Point::new(22, 50)); // too near the other end: MIN_SIZE is kept
+        assert_eq!(
+            e.items()[0],
+            Item::Line {
+                from: Point::new(20, 50),
+                to: Point::new(20 + MIN_SIZE, 50),
+                style: Style::DEFAULT,
+            }
+        );
+        assert!(e.undo());
+        assert_eq!(
+            e.items()[0].bounds(),
+            Rect::new(20, 50, 100, 0),
+            "one undo step"
+        );
+    }
+
+    #[test]
+    fn ellipse_and_line_leave_the_pixels_alone() {
+        let src = detailed(40, 30);
+        let items = [
+            Item::Ellipse(Rect::new(2, 2, 30, 20), Style::DEFAULT),
+            Item::Line {
+                from: Point::new(0, 0),
+                to: Point::new(39, 29),
+                style: Style::DEFAULT,
+            },
+        ];
+        assert_eq!(apply_pixel_layer(&src, &items), src);
     }
 }
