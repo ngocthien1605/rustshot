@@ -46,19 +46,22 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WM_SIZE, WM_SYSKEYDOWN, WNDCLASSW, WS_CHILD, WS_OVERLAPPEDWINDOW, WS_VISIBLE,
 };
 
+use windows::Win32::Graphics::Gdi::WHITE_BRUSH;
 use windows::Win32::Graphics::Gdi::{
     Ellipse, ScreenToClient, DT_CENTER, DT_SINGLELINE, DT_VCENTER,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::VK_DELETE;
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetCursorPos, SetCursor, HTCLIENT, IDC_ARROW, IDC_SIZEALL, WM_SETCURSOR,
+    GetCursorPos, SetCursor, HTCLIENT, IDC_ARROW, IDC_SIZEALL, IDC_SIZENESW, IDC_SIZENS,
+    IDC_SIZENWSE, IDC_SIZEWE, WM_SETCURSOR,
 };
 
 use crate::platform::gdi::{ScreenDc, Surface};
 
 use super::model::{
     apply_pixel_layer, arrow_geometry, enter_action, font_px, shortcut, Color, Doc, Editor,
-    EnterAction, EscapeResult, Item, Style, Thickness, Tool, Typing, View, HIGHLIGHT_ALPHA,
+    EnterAction, EscapeResult, Item, ResizeCursor, Style, Thickness, Tool, Typing, View,
+    HIGHLIGHT_ALPHA,
 };
 
 const CLASS_NAME: PCWSTR = w!("RustShotAnnotate");
@@ -67,8 +70,11 @@ static REGISTER: Once = Once::new();
 /// Toolbar height and canvas margin at 96 DPI; scaled by the window's DPI (see `dpi`).
 const TOOLBAR_H: i32 = 40;
 const MARGIN: i32 = 8;
-/// How far (screen px at 96 DPI) a click may miss an annotation and still select it.
+/// How far (screen px at 96 DPI) a click may miss an annotation, or a resize handle of the
+/// selected one, and still pick it.
 const HIT_SLOP: i32 = 5;
+/// Half the side of a resize handle's square (screen px at 96 DPI): a little inside the slack.
+const HANDLE_HALF: i32 = 4;
 /// How dark the part outside a crop is shown (about 60 % black).
 const CROP_SHADE_ALPHA: u8 = 150;
 /// Toolbar buttons: id, label, gap before the button, width, extra style — lengths at 96 DPI;
@@ -570,8 +576,9 @@ unsafe fn wndproc_inner(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) ->
             LRESULT(0)
         }
         WM_ERASEBKGND => LRESULT(1), // we paint everything (double-buffered)
-        // Over the canvas with the Select tool: a move cursor on an annotation, else an arrow.
-        // Elsewhere (and with the drawing tools) the class cursor, the red crosshair.
+        // Over the canvas with the Select tool: a resize cursor on a handle of the selected
+        // annotation, a move cursor on an annotation, else an arrow. Elsewhere (and with the
+        // drawing tools) the class cursor, the red crosshair.
         WM_SETCURSOR
             if wparam.0 == hwnd.0 as usize
                 && (lparam.0 & 0xFFFF) as u32 == HTCLIENT
@@ -579,12 +586,13 @@ unsafe fn wndproc_inner(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) ->
         {
             let mut pt = POINT::default();
             // SAFETY: reads the cursor position and maps it into our client area.
-            let over_item = unsafe {
-                GetCursorPos(&mut pt).is_ok()
-                    && ScreenToClient(hwnd, &mut pt).as_bool()
-                    && ctx.editor.hit_test(ctx.view.to_image(pt.x, pt.y)).is_some()
+            let in_client =
+                unsafe { GetCursorPos(&mut pt).is_ok() && ScreenToClient(hwnd, &mut pt).as_bool() };
+            let shape = if in_client {
+                select_cursor(&ctx.editor, ctx.view.to_image(pt.x, pt.y))
+            } else {
+                IDC_ARROW
             };
-            let shape = if over_item { IDC_SIZEALL } else { IDC_ARROW };
             // SAFETY: a shared system cursor, never freed.
             unsafe {
                 if let Ok(cursor) = LoadCursorW(None, shape) {
@@ -709,6 +717,19 @@ unsafe fn wndproc_inner(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) ->
     }
 }
 
+/// The system cursor for the Select tool at `p` (image px): the resize direction over a handle
+/// of the selected annotation, the move cursor over any annotation, the arrow elsewhere.
+fn select_cursor(editor: &Editor, p: Point) -> PCWSTR {
+    match editor.resize_cursor(p) {
+        Some(ResizeCursor::NwSe) => IDC_SIZENWSE,
+        Some(ResizeCursor::NeSw) => IDC_SIZENESW,
+        Some(ResizeCursor::WestEast) => IDC_SIZEWE,
+        Some(ResizeCursor::NorthSouth) => IDC_SIZENS,
+        None if editor.hit_test(p).is_some() => IDC_SIZEALL,
+        None => IDC_ARROW,
+    }
+}
+
 fn handle_char(hwnd: HWND, ctx: &mut Ctx, unit: u16) {
     match unit {
         0x08 => ctx.editor.on_backspace(),
@@ -818,8 +839,9 @@ fn redraw(hwnd: HWND) {
 
 /// Rebuild the canvas source when the pixel items changed (a highlight or redaction drawn,
 /// moved, undone or redone), so the screen shows the pixels the export will contain. A pixel
-/// item being dragged by the Select tool is left out (and drawn as a preview instead), so the
-/// drag costs one rebuild at its start and one at its end, not one per mouse move.
+/// item being dragged by the Select tool — moved or resized — is left out (and drawn as a
+/// preview instead), so the drag costs one rebuild at its start and one at its end, not one per
+/// mouse move.
 fn sync_source(ctx: &mut Ctx) {
     let moving = ctx.editor.moving_index();
     let pixels: Vec<Item> = ctx
@@ -885,7 +907,8 @@ fn paint(hwnd: HWND, ctx: &mut Ctx) {
         // Keep annotations inside the picture while previewing.
         let saved = SaveDC(back);
         IntersectClipRect(back, v.ox, v.oy, v.ox + v.px(iw), v.oy + v.px(ih));
-        // The shape being drawn, or a pixel item being moved (left out of `src` meanwhile).
+        // The shape being drawn, or a pixel item being moved or resized (left out of `src`
+        // meanwhile).
         let preview = ctx.editor.preview().or_else(|| {
             let item = ctx.editor.items().get(ctx.editor.moving_index()?)?;
             item.is_pixel().then(|| item.clone())
@@ -917,10 +940,32 @@ fn paint(hwnd: HWND, ctx: &mut Ctx) {
             let _ = DrawFocusRect(back, &frame);
         }
         let _ = RestoreDC(back, saved);
+        // The resize handles go over everything, and are not clipped to the picture: one on the
+        // picture's edge shows whole. On screen only — the export never calls this.
+        let half = crate::platform::dpi::scale(HANDLE_HALF, ctx.dpi);
+        for (_, at) in ctx.editor.handles() {
+            paint_handle(back, v.ox + v.px(at.x), v.oy + v.px(at.y), half);
+        }
 
         let _ = BitBlt(hdc, 0, 0, cw, ch, Some(back), 0, 0, SRCCOPY);
         drop(buffer);
         let _ = EndPaint(hwnd, &ps);
+    }
+}
+
+/// A resize handle: a white square with a black edge, centred on `(x, y)` (device px), so it
+/// reads on any screenshot.
+fn paint_handle(hdc: HDC, x: i32, y: i32, half: i32) {
+    let square = RECT {
+        left: x - half,
+        top: y - half,
+        right: x + half + 1,
+        bottom: y + half + 1,
+    };
+    // SAFETY: fills and frames a rectangle on the DC we are given with stock brushes.
+    unsafe {
+        FillRect(hdc, &square, HBRUSH(GetStockObject(WHITE_BRUSH).0));
+        FrameRect(hdc, &square, HBRUSH(GetStockObject(BLACK_BRUSH).0));
     }
 }
 
@@ -1956,5 +2001,35 @@ mod tests {
             !format!("{e:#}").is_empty(),
             "the reason is shown to the user"
         );
+    }
+
+    #[test]
+    fn the_select_cursor_is_resize_on_a_handle_move_on_an_item_arrow_elsewhere() {
+        let mut e = Editor::new(200, 100);
+        e.set_tool(Tool::BlackBox);
+        e.on_down(Point::new(40, 20));
+        e.on_up(Point::new(120, 70));
+        e.set_tool(Tool::Select);
+        // Not selected yet: no handles, the whole box moves.
+        assert_eq!(select_cursor(&e, Point::new(40, 20)), IDC_SIZEALL);
+        e.on_down(Point::new(80, 45));
+        e.on_up(Point::new(80, 45));
+        assert_eq!(select_cursor(&e, Point::new(40, 20)), IDC_SIZENWSE);
+        assert_eq!(select_cursor(&e, Point::new(120, 20)), IDC_SIZENESW);
+        assert_eq!(select_cursor(&e, Point::new(120, 45)), IDC_SIZEWE);
+        assert_eq!(select_cursor(&e, Point::new(80, 70)), IDC_SIZENS);
+        assert_eq!(select_cursor(&e, Point::new(80, 45)), IDC_SIZEALL);
+        assert_eq!(select_cursor(&e, Point::new(180, 90)), IDC_ARROW);
+    }
+
+    #[test]
+    fn handles_are_never_in_the_export() {
+        // Render takes the items only: a selection (and its handles) is window state.
+        let items = [Item::BlackBox(Rect::new(10, 10, 20, 20))];
+        let out = render(&white(60, 40), &items).unwrap();
+        for (x, y) in [(8, 8), (9, 9), (30, 30), (31, 31), (20, 8), (8, 20)] {
+            assert_eq!(px(&out, x, y), [255, 255, 255, 255], "({x},{y})");
+        }
+        assert_eq!(px(&out, 10, 10), [0, 0, 0, 255], "the corner pixel itself");
     }
 }
