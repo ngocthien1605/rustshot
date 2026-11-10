@@ -74,39 +74,54 @@ is gone are dropped when the window opens. `history.enabled` and `history.max_en
 
 ### Annotating a screenshot
 
-Click **Annotate** in the flyout to open the screenshot in RustShot's editor. Its tools, chosen
-from the toolbar or with a letter key:
+Click **Annotate** in the flyout to open the screenshot in RustShot's editor. The toolbar has two
+rows: the tools, then colour, line, Undo, Redo, Save and Copy. The tools, chosen from the toolbar
+or with a letter key:
 
 - **Rectangle** (`R`) — drag on the image to draw a rectangle outline.
+- **Ellipse** (`E`) — drag a box; an ellipse outline is drawn inside it.
 - **Text** (`T`) — drag to draw a box, then just type; **Enter** saves the text into the box.
   **Shift+Enter** or **Alt+Enter** starts a new line instead of saving.
   `Backspace` edits while typing, `Esc` throws the text away, and clicking elsewhere also saves it.
 - **Arrow** (`A`) — drag from the tail; the head is drawn where you release.
+- **Line** (`L`) — drag from one end to the other; a straight line without a head.
 - **Highlight** (`H`) — a see-through box (40 % colour) over text you want to point out.
 - **Pixelate** (`P`) — redacts an area: each 12 × 12-px block becomes its average colour in the
   saved and copied image (the detail is gone from that file, not hidden under an overlay). The
   original screenshot is not changed, so share the `…_annotated` copy.
 - **Black box** (`B`) — redacts an area with solid black; unlike pixelate, not even the shape of
   large text or a logo is left.
+- **Spotlight** (`F`) — drag a box; everything outside it is darkened (55 % black) in the saved
+  and copied image. Several spotlights darken once, outside all of them together, and always
+  after the other pixel tools. No colour, no line. It hides nothing: the dark part stays
+  readable.
 - **Step** (`N`) — click to place numbered circles 1, 2, 3 … (placed where the button is
   released). The next number is one more than the highest present; deleting one in the middle
   does not renumber the rest. The line setting chooses the size (22 / 30 / 44 px).
-- **Select** (`S`) — click a mark (the top one wins; an outline by its edge) to select it; drag to
-  move it inside the picture, `Delete` to remove it, a colour or line button to restyle it, `Esc`
-  to deselect. Each move, delete or restyle is one undo step.
+- **Select** (`S`) — click a mark (the top one wins; a rectangle or ellipse outline and a
+  spotlight by their edge) to select it; drag to move it inside the picture, drag a **handle** to
+  resize it, `Delete` to remove it, a colour or line button to restyle it, `Esc` to deselect.
+  Boxes have eight handles (corners and side midpoints; only the corners on a very small box),
+  arrows and lines one on each end, step markers none. A handle dragged past the opposite side
+  flips the mark; nothing gets smaller than 6 px or leaves the picture. The pointer shows the
+  resize direction over a handle. Each move, resize, delete or restyle is one undo step.
 - **Crop** (`C`) — drag the part to keep (both corner pixels included); the rest is shaded and is
   cut off by Save and Copy. Drag again to replace it; a click removes it. Undoable.
 
 The mouse cursor over the image is a red crosshair. **Colour** (six swatches, keys `1`–`6`: red,
 yellow, green, blue, black, white) and **line** (thin 2 px, medium 3 px, thick 6 px; `[` / `]`)
 apply to the current tool (or, with Select, to the selected mark), and each tool remembers its
-own: red and medium by default, yellow for Highlight. Highlight, pixelate and black box change the
-pixels, so they always sit under outlines, arrows, text and step markers. The single-key shortcuts act only while no text box is being typed in, and follow the typed
+own: red and medium by default, yellow for Highlight. Highlight, pixelate, black box and spotlight
+change the pixels, so they always sit under outlines, ellipses, lines, arrows, text and step
+markers. The single-key shortcuts act only while no text box is being typed in, and follow the typed
 character (with an East Asian IME on, switch it to direct input).
 
 Other controls: **Undo** (`Ctrl+Z`) takes back the last change (or cancels the shape or move in
 progress); **Redo** (`Ctrl+Y` or `Ctrl+Shift+Z`) restores it, until you make a new change; **Save** (`Ctrl+S`) writes a copy next to the original as `…_annotated.png` — your
-original is never overwritten, and saving again creates `…_annotated_2.png`; **Copy** (`Ctrl+C`)
+original is never overwritten, and saving again creates `…_annotated_2.png`. After a save the
+title bar says `saved as …` and the **flyout** opens for the saved file, showing it as saved
+(cropped and annotated) with the usual buttons; the editor stays open. A save that fails is
+reported with its reason. **Copy** (`Ctrl+C`)
 puts the annotated image on the clipboard. Closing the editor with unsaved annotations asks
 whether to save first. Annotations are drawn at the screenshot's full resolution, whatever the
 window size.

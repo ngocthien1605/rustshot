@@ -2,17 +2,22 @@
 
 Status legend: ✅ done & verified · 🟡 in progress · ⬜ not started · 🔬 manual-QA only (GPU/UI)
 
-## Current status (2026-11-05, release 0.1.11)
+## Current status (2026-11-10, release 0.1.11 + unreleased editor work)
 
 - **Shipped:** v0.1.11 on GitHub (portable zip + `.sha256`, built by the release workflow).
   Every phase M0–M7 is done, followed by review items 1–7, the Settings microphone picker, the
   final-review fixes, two rounds of annotation tools (0.1.9: pixelate, arrow, highlight,
   palette, line widths, redo; 0.1.10: black box, select/move/restyle/delete, step markers) and
   0.1.11: crop, pin to screen and a capture history.
+- **Unreleased (branch `feat/editor-feedback-and-shapes`):** Save in the editor shows the saved
+  file in the flyout and reports a failure with its reason; the selected annotation is resized
+  by handles; Ellipse, Line and Spotlight tools; the editor toolbar is two rows.
 - **Gate:** fmt, clippy `-D warnings`, build and **278 tests** green with `--locked` on CI
-  (Windows); `cargo deny check` ok; MSRV 1.90 checked.
-- **Open:** the 0.1.10 and 0.1.11 windows have not been used by a person yet (QA-CHECKLIST,
-  "Annotation tools 2" and "Crop, Pin to screen, History"; the 0.1.9 tools were tried by the
+  (Windows); `cargo deny check` ok; MSRV 1.90 checked. On the branch: **332 tests** green
+  locally on Windows; cargo-deny and MSRV are for CI on the PR.
+- **Open:** the 0.1.10 and 0.1.11 windows and the branch's editor changes have not been used
+  by a person yet (QA-CHECKLIST, "Annotation tools 2", "Crop, Pin to screen, History" and "Save
+  feedback, resize handles, Ellipse / Line / Spotlight"; the 0.1.9 tools were tried by the
   owner and looked fine); the manual hardware checks still to run (Bluetooth mic through the
   picker, device unplug, read-back throttle, tray tooltip, run at startup, display unplug, GPU
   reset, a full 3-minute A/V sync); and the deferred items: code signing, an MSI that is
@@ -214,6 +219,28 @@ verification log at the end (newest first).
 ---
 
 ### Verification log
+- 2026-11-10: **Save feedback, resize handles, Ellipse / Line / Spotlight** (branch
+  `feat/editor-feedback-and-shapes`, four feature commits and docs; no version bump). Written
+  and run on Windows 11 with the pinned Rust 1.98.1. **Ran, all green:** `cargo fmt --all --
+  --check`; `cargo clippy --workspace --all-targets --locked -- -D warnings`; `cargo build
+  --workspace --locked`; `cargo test --workspace --locked` — **332 tests** (app 212, including
+  the GDI render tests for the ellipse, line and spotlight export pixels and the save-to-disk
+  tests; imaging 36 with `dim_outside`; config 36; capture-core 22; recorder 26). Every earlier
+  test passes unchanged except two that enumerate the tools or the toolbar and had to learn the
+  new ones (`which_tools_use_colour_and_thickness` lists Spotlight as colourless and lineless;
+  the toolbar overlap test checks each of the two rows). **Hands-on, automated:** a throwaway
+  test (not committed) opened the real editor window on a 900×500 image with an app state,
+  sent it mouse and key messages and captured its client area with `PrintWindow` at 96 DPI:
+  two-row toolbar laid out (client 916 px wide for a 722-px toolbar), ellipse / line previews,
+  the spotlight darkening live while dragged and a second spotlight not deepening the
+  background, eight handles on the selected ellipse and spotlight, resize by a handle, crop,
+  then Save → title `saved as shot_annotated.png`, the flyout window present with the cropped
+  annotated thumbnail (841×451 file), `AppState.flyout` pointing at it, the editor no longer
+  dirty, and a second Save replacing the flyout with `shot_annotated_2.png`. **Not run:**
+  `cargo deny check` (cargo-deny is not installed here; no dependency or `Cargo.lock` change);
+  the MSRV 1.90 build; the portable zip. **Not checked by a person:** real mouse use (cursor
+  shapes over handles, drag feel), 125 % / 150 % scaling and the 1366×768 layout, the
+  failed-save message box, Save from the close question. Steps are in QA-CHECKLIST.
 - 2026-11-05: **Release 0.1.11** (tag `v0.1.11`): crop in the editor, pin to screen, capture
   history. CI on the PR (windows-latest) ran 278 tests including the crop export, image/DIB round
   trip and History layout tests, cargo-deny and the portable zip build. The windows themselves

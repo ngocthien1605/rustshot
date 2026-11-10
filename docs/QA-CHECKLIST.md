@@ -170,6 +170,79 @@ the export crop runs in the render tests on CI; the windows below are still to b
       in Explorer, reopen History → its entry is gone. `history.enabled = false` → nothing new is
       recorded. Arrow keys move through the list after the window opens.
 
+## Save feedback, resize handles, Ellipse / Line / Spotlight
+
+The model (handles, hit tests, resize math, spotlight union), `imaging::dim_outside`, the export
+pixels of the three new items and the save itself (`save_annotated`) are unit-tested. On
+2026-11-10 the editor window was also driven with posted mouse and key messages at 96 DPI and
+its client area captured (toolbar rows, live previews, handles, flyout after Save); a person
+using the mouse has not tried it yet, and nothing was checked at 125 % / 150 %.
+
+- [ ] **Toolbar**: two rows — Select, Crop, Rectangle, Ellipse, Text, Arrow, Line, Highlight,
+      Pixelate, Black box, Spotlight, Step on top; six colours, three lines, Undo, Redo, Save,
+      Copy below. Every label readable and nothing overlapping at 100 %, 125 % and 150 %. On a
+      1366×768 screen at 125 % the whole toolbar is visible without resizing the window. Dragging
+      the window to a monitor with another scale keeps both rows laid out.
+- [ ] **Save shows the result**: draw something, crop, **Save** → the title says `saved as
+      …_annotated.png`, the editor still shows the full picture with the crop shaded, and the
+      preview panel appears bottom-right with a thumbnail of the **cropped, annotated** file.
+      Its Open / Folder / Copy / Path / Pin act on the `_annotated` file; Annotate opens that
+      file in a second editor; Delete removes it. `Ctrl+S` does the same as the button. A second
+      Save replaces the panel (now `…_annotated_2.png`). The panel does not take the keyboard
+      focus: typing a shortcut letter right after Save still reaches the editor.
+- [ ] **Save from the close question**: with unsaved marks, close → Yes → the editor closes and
+      the preview panel for the saved file stays.
+- [ ] **Save with a capture flyout already open**: take a screenshot, Annotate from History while
+      a newer capture's panel is showing, Save → the panel now shows the annotated file.
+- [ ] **A failed Save is reported**: open a screenshot from History, then make its folder
+      read-only (or delete the folder and put a file with the folder's name in its place), Save →
+      a message box "The annotated screenshot could not be saved." with the reason; the title
+      says `save failed`; the editor stays usable and still asks to save on close.
+- [ ] **Copy**: the title says `copied to clipboard`; no panel appears; paste in Paint matches.
+- [ ] **Handles**: Select, click a rectangle → dotted frame plus eight white squares; an arrow or
+      line → one on each end; a step marker → none. Pointer over a corner ↖↘ / ↗↙, over a side
+      ↔ / ↕, elsewhere on the mark the four-way arrow, off the mark the normal arrow. Over an
+      arrow's end the two-way arrow follows the arrow's direction.
+- [ ] **Resize**: drag each of the eight handles of a rectangle: only the sides that handle owns
+      move. Drag a handle across the opposite side: the box flips and keeps following. Drag onto
+      the opposite side: the box stays 6 px, never vanishes. Drag far outside the picture: the
+      side stops at the picture's edge, and comes straight back with the pointer. A handle on the
+      picture's edge is drawn whole and can be grabbed from just outside the picture. One Undo
+      takes back the whole resize; Redo redoes it; Esc during the drag cancels it.
+- [ ] **Resize each kind**: Text (the text re-wraps, the font follows the box height), Highlight,
+      Pixelate and Black box (while dragging, the area shows its preview and what is under it;
+      on release the canvas is covered again), Ellipse, Spotlight; Arrow and Line by their ends
+      (the arrow head stays on the same end).
+- [ ] **Click on a handle without moving** changes nothing and adds no Undo step.
+- [ ] **Small boxes**: a box about 10 px wide shows no top/bottom midpoint handles and can still
+      be moved by dragging its middle; zoomed out (large screenshot in a small window) handles
+      stay the same size on screen and are still easy to grab.
+- [ ] **Handles are not saved**: Save and Copy with a mark selected → no squares or dotted frame
+      in the file or in the pasted image.
+- [ ] **Ellipse** (`E`): the outline follows the drag live, in the chosen colour and line; a tiny
+      drag draws nothing. Select picks it on its outline, not in its middle (what is inside can
+      be clicked). Move, resize, recolour, change line, Delete, Undo/Redo all work. Saved file:
+      the ellipse is inside its box, same thickness as a rectangle.
+- [ ] **Line** (`L`): follows the drag live, no head; a short level or upright line is kept (it
+      needs length, not height). Select picks it near the line only. Move, resize by either end,
+      restyle, Delete, Undo/Redo. Both new tools start red / medium and remember their own style
+      separately from Rectangle and Arrow.
+- [ ] **Spotlight** (`F`): colour and line buttons are greyed. While dragging, everything outside
+      the box darkens live and the box has a dotted frame; a tiny drag leaves nothing. After
+      release the picture stays darkened outside the box. Arrows, outlines and text drawn before
+      or after stay bright on the dark part; a highlight outside the box is dimmed.
+- [ ] **Several spotlights**: draw a second one overlapping the first, and a third apart: the
+      background is no darker than with one, the overlap is not darker or lighter than the rest
+      of the boxes, and during the drag of the new box the earlier ones stay bright. Undo removes
+      them one at a time; removing the last one restores the full brightness.
+- [ ] **Spotlight with Select**: picked on its edge only (what it frames can be clicked);
+      dragging or resizing it updates the darkening live; Delete removes it. A spotlight dragged
+      into a corner of the picture leaves no dark line along the picture's edge.
+- [ ] **Spotlight in the file**: Save → the `_annotated` file is darkened exactly as on screen;
+      with a crop, the crop is cut after the darkening. Copy → paste matches.
+- [ ] **Keys**: `E`, `L`, `F` choose Ellipse, Line, Spotlight and press the right toolbar button;
+      `S` is still Select; while typing in a text box they type letters.
+
 ## M3 — Recording (MP4, video-only)
 - [ ] Countdown → compact always-on-top toolbar (elapsed + Pause/Stop) → Stop finalises.
 - [ ] 60 s 1080p30 monitor recording plays correctly in VLC and Windows Media Player.

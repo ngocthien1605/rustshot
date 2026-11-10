@@ -154,20 +154,28 @@ keeps the newest 100 entries; to change that, or to stop keeping a history, see
 
 ## 6. Annotate a screenshot
 
-1. In the preview panel, click **Annotate**. The editor opens with your screenshot.
+1. In the preview panel, click **Annotate**. The editor opens with your screenshot. Its toolbar
+   has two rows: the tools on top; colours, line thickness, **Undo**, **Redo**, **Save** and
+   **Copy** below.
 2. Choose a tool from the toolbar, or press its letter key:
    - **Rectangle** (`R`): drag over the image.
+   - **Ellipse** (`E`): drag a box; an oval outline is drawn inside it — to circle something.
    - **Text** (`T`): drag a box, then type. **Enter** places the text; **Shift+Enter** or
      **Alt+Enter** starts a new line; **Backspace** deletes; **Esc** throws the text away;
      clicking elsewhere also places it.
    - **Arrow** (`A`): drag from where the arrow starts to what it should point at. The head is
      drawn where you let go of the mouse button.
+   - **Line** (`L`): drag from one end to the other: a straight line, without a head.
    - **Highlight** (`H`): drag over text to mark it with a see-through colour, like a
      highlighter pen. The text underneath stays readable.
    - **Pixelate** (`P`): drag over anything you want to hide — a password, an e-mail address, a
      name. The area turns into coarse blocks. Read *Hiding information safely* below.
    - **Black box** (`B`): drag over something to cover it with solid black — the safest way to
      hide it, because nothing of it is left, not even its shape.
+   - **Spotlight** (`F`, for "focus"): drag over the part people should look at. Everything
+     **outside** the box is darkened in the saved and copied image; the box itself stays as it
+     is. You can draw several: the picture is darkened once, outside all of them together, so
+     more spotlights never make the background darker. It has no colour and no line.
    - **Step** (`N`): click to place a numbered circle: ①, then ②, ③ … — handy for "do this, then
      that" instructions. The marker appears where you release the mouse button, so you can drag
      to aim it. The colour fills the circle (the number is white, or black on yellow and white);
@@ -175,35 +183,56 @@ keeps the newest 100 entries; to change that, or to stop keeping a history, see
    - **Crop** (`C`): drag over the part of the screenshot you want to keep. The rest is shaded
      and is cut off when you **Save** or **Copy**. Drag again to change it; a single click with
      Crop removes it. Undo works on crops too. The original screenshot is not changed.
-3. **Change what you drew: Select** (`S`). Click a mark to select it — a dotted frame appears
-   around it. Then:
+3. **Change what you drew: Select** (`S`). Click a mark to select it — a dotted frame with small
+   white squares (**handles**) appears around it. Then:
    - **drag** it to move it (it stays inside the picture);
+   - **drag a handle** to resize it. A box (Rectangle, Ellipse, Text, Highlight, Pixelate, Black
+     box, Spotlight) has eight handles: a corner handle moves two sides, a handle in the middle
+     of a side moves that side. An Arrow or a Line has a handle on each end. Dragging a handle
+     past the opposite side flips the mark over. A mark cannot be made smaller than 6 pixels or
+     pulled outside the picture. Step markers have no handles: the line setting chooses their
+     size;
    - press **Delete** to remove it;
    - click a **colour** or **line** button to change it;
    - press **Esc** (or click an empty spot) to deselect.
 
-   The mark on top is picked first; a rectangle outline is picked by its edge, so you can still
-   click what is inside it. Over a mark, the pointer becomes a four-way arrow. Each move, delete
-   or change is one step for Undo.
+   The mark on top is picked first; a rectangle or ellipse outline and a spotlight are picked by
+   their edge, so you can still click what is inside them. Over a mark, the pointer becomes a
+   four-way arrow; over a handle, a two-way arrow that shows which way it resizes. On a very
+   small box only the corner handles are shown, so that there is room left to drag the box
+   itself. Each move, resize, delete or change is one step for Undo.
 4. **Colour and line.** The six colour squares (red, yellow, green, blue, black, white — keys
    `1` to `6`) and the three line samples (thin, medium, thick — `[` thinner, `]` thicker) set
    the colour and line of the **current tool**. The chosen square or line has a dark double
-   frame. Each tool remembers its own choice: Rectangle, Text, Arrow and Step start red and
-   medium (exactly as before these options existed), Highlight starts yellow. When a tool does
-   not use a setting, its buttons are greyed out (Pixelate and Black box have no colour;
-   Highlight, Pixelate and Black box have no line). Picking a colour while typing changes the
-   text you are typing.
-5. **Undo** (`Ctrl+Z`) takes back the last change — a new mark, a move, a delete or a colour
-   change; **Redo** (`Ctrl+Y` or `Ctrl+Shift+Z`) brings it back. Making a new change after an
+   frame. Each tool remembers its own choice: Rectangle, Ellipse, Text, Arrow, Line and Step
+   start red and medium (exactly as before these options existed), Highlight starts yellow.
+   When a tool does not use a setting, its buttons are greyed out (Pixelate, Black box and
+   Spotlight have no colour; Highlight, Pixelate, Black box and Spotlight have no line). Picking
+   a colour while typing changes the text you are typing.
+5. **Undo** (`Ctrl+Z`) takes back the last change — a new mark, a move, a resize, a delete or a
+   colour change; **Redo** (`Ctrl+Y` or `Ctrl+Shift+Z`) brings it back. Making a new change after an
    undo clears what could be redone, and Redo is greyed out when there is nothing to redo.
 6. **Save** (`Ctrl+S`) writes a copy next to the original named `…_annotated.png`; saving again
    makes `…_annotated_2.png`, and so on. **The original screenshot is never changed.**
-7. **Copy** (`Ctrl+C`) puts the annotated image on the clipboard.
+
+   **What you see after Save:** the editor stays open exactly as it was (a crop is still only
+   shaded there, so you can go on editing), its title bar says `saved as …_annotated.png`, and
+   the **preview panel** opens in the bottom-right corner of the screen showing the **saved
+   file** — cropped and annotated, as it is on disk — with the same buttons as after a capture
+   (**Open**, **Folder**, **Copy**, **Pin**, …; **Annotate** opens the saved copy in a new
+   editor). If the file could not be written, a message tells you why and nothing is saved.
+7. **Copy** (`Ctrl+C`) puts the annotated image on the clipboard; the title bar says
+   `copied to clipboard`.
 
 Closing the editor with unsaved marks asks whether to save first. Marks are drawn at the
-screenshot's full resolution, however small the editor window is. Highlight, Pixelate and Black
-box change the picture itself, so they always lie *under* rectangles, arrows, text and step
-markers.
+screenshot's full resolution, however small the editor window is. Highlight, Pixelate, Black box
+and Spotlight change the picture itself, so they always lie *under* rectangles, ellipses, lines,
+arrows, text and step markers — a red arrow drawn over the darkened part of a spotlit picture
+stays bright red.
+
+**Spotlight details.** The darkening is always applied last: a highlight or a redaction outside
+the spotlights is dimmed with the rest of the background, whichever you drew first. While you
+draw, move or resize a spotlight, the editor darkens the picture live around all spotlights.
 
 **Step numbers** count up from 1: the next marker gets one more than the highest number on the
 picture. Undoing or deleting the last marker frees its number again; deleting one in the middle
@@ -227,8 +256,10 @@ layer. Keep three things in mind:
 - Pixelate is meant for normal-size text such as names, addresses and numbers. Very large
   lettering or a well-known logo can stay recognisable by its rough shape: use **Black box** for
   those.
-- While you **drag** a pixelate area or black box with Select, the editor shows what is under it
-  until you let go (only on screen; the saved image is always covered).
+- While you **drag** or **resize** a pixelate area or black box with Select, the editor shows
+  what is under it until you let go (only on screen; the saved image is always covered).
+- **Spotlight hides nothing.** The darkened part stays readable; use Pixelate or Black box for
+  what must not be seen.
 
 ## 7. Record a video (MP4)
 
@@ -333,15 +364,16 @@ Settings tells you if a new one is taken too. The tray menu always works.
 
 | Action | Keys |
 |---|---|
-| Select / Crop / Rectangle / Text / Arrow tool | `S` / `C` / `R` / `T` / `A` |
-| Highlight / Pixelate / Black box / Step tool | `H` / `P` / `B` / `N` |
+| Select / Crop / Rectangle / Ellipse / Text tool | `S` / `C` / `R` / `E` / `T` |
+| Arrow / Line / Highlight / Pixelate tool | `A` / `L` / `H` / `P` |
+| Black box / Spotlight / Step tool | `B` / `F` / `N` |
 | Delete the selected mark | `Delete` |
 | Colour red, yellow, green, blue, black, white | `1` … `6` |
 | Thinner / thicker line | `[` / `]` |
 | Undo / Redo | `Ctrl+Z` / `Ctrl+Y` or `Ctrl+Shift+Z` |
 | Save / Copy | `Ctrl+S` / `Ctrl+C` |
 | Place the text / new line in the text | `Enter` / `Shift+Enter` or `Alt+Enter` |
-| Cancel the text, shape or move in progress, else deselect; close the editor if nothing is | `Esc` |
+| Cancel the text, shape, move or resize in progress, else deselect; close the editor if nothing is | `Esc` |
 
 While you are typing in a text box, the single keys (`R`, `1`, `[` …) type text instead.
 
