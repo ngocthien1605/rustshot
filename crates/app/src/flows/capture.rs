@@ -97,14 +97,21 @@ fn clear_busy() {
 }
 
 fn schedule_delay(delay: u8) {
-    let Some(hwnd_raw) = dispatch::with_app(|app| app.dispatch_hwnd.0 as isize) else {
+    // The token ties the timer to this request: see `dispatch::TimerEpoch`.
+    let Some((hwnd_raw, token)) =
+        dispatch::with_app(|app| (app.dispatch_hwnd.0 as isize, app.timer_epoch.arm()))
+    else {
         return;
     };
     tracing::info!("capturing in {delay}s…");
     std::thread::spawn(move || {
         std::thread::sleep(Duration::from_secs(delay as u64));
         // SAFETY: PostMessageW is thread-safe; the handle refers to the live dispatch window.
-        dispatch::post(HWND(hwnd_raw as *mut c_void), Action::ExecuteDelayedShot);
+        dispatch::post_timed(
+            HWND(hwnd_raw as *mut c_void),
+            Action::ExecuteDelayedShot,
+            token,
+        );
     });
 }
 

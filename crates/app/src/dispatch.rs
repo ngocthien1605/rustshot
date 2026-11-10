@@ -100,6 +100,47 @@ pub fn post(hwnd: HWND, action: Action) {
     }
 }
 
+/// Post a timer-driven action (`ExecuteDelayedShot`, `ExecuteRecordStart`) together with the
+/// [`TimerEpoch`] token its timer was armed with; the dispatch window drops it if the timer has
+/// been cancelled or superseded since.
+pub fn post_timed(hwnd: HWND, action: Action, token: u32) {
+    // SAFETY: as for `post`.
+    unsafe {
+        let _ = PostMessageW(
+            Some(hwnd),
+            WM_RUSTSHOT_ACTION,
+            WPARAM(action as u32 as usize),
+            LPARAM(token as isize),
+        );
+    }
+}
+
+/// Identifies the one delay/countdown timer that may still fire. The timers are plain sleeping
+/// threads that cannot be stopped, so each carries the token it was armed with and the dispatch
+/// window ignores any whose token is no longer current. Without this, a countdown cancelled
+/// with Stop would still fire later and act on whatever flow was running by then: releasing its
+/// `busy` gate, or starting its recording before its own countdown ended.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TimerEpoch(u32);
+
+impl TimerEpoch {
+    /// Start a new timer: every earlier token becomes stale. Returns the new timer's token.
+    pub fn arm(&mut self) -> u32 {
+        self.0 = self.0.wrapping_add(1);
+        self.0
+    }
+
+    /// Cancel the armed timer, if any: its token becomes stale.
+    pub fn cancel(&mut self) {
+        self.0 = self.0.wrapping_add(1);
+    }
+
+    /// True if `token` belongs to the timer armed last and not cancelled since.
+    pub fn is_current(self, token: u32) -> bool {
+        self.0 == token
+    }
+}
+
 /// All UI-thread-owned application state.
 pub struct AppState {
     pub settings: Settings,
@@ -115,6 +156,8 @@ pub struct AppState {
     pub recording: Option<crate::ui::recording::Recording>,
     /// A recording request queued behind the countdown.
     pub pending_record: Option<recorder::RecordCfg>,
+    /// Which delay/countdown timer is still allowed to fire (see [`TimerEpoch`]).
+    pub timer_epoch: TimerEpoch,
     /// Registered global hotkeys (kept alive; replaced when settings change them).
     pub hotkeys: Option<crate::hotkeys::Hotkeys>,
     /// The tray icon (removed from the notification area when dropped).
@@ -196,6 +239,7 @@ pub fn create(settings: Settings, output_folder: PathBuf) -> Result<HWND> {
             pending_shot: None,
             recording: None,
             pending_record: None,
+            timer_epoch: TimerEpoch::default(),
             hotkeys: None,
             tray: None,
         });
@@ -217,7 +261,18 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
 unsafe fn wndproc_inner(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     if msg == WM_RUSTSHOT_ACTION {
         if let Some(action) = Action::from_u32(wparam.0 as u32) {
-            handle(action);
+            // A timer that was cancelled (or replaced by a newer one) still posts when its
+            // sleep ends; its token no longer matches, and it must not touch the current flow.
+            let stale = matches!(
+                action,
+                Action::ExecuteDelayedShot | Action::ExecuteRecordStart
+            ) && !with_app(|app| app.timer_epoch.is_current(lparam.0 as u32))
+                .unwrap_or(false);
+            if stale {
+                tracing::debug!("{action:?} from a cancelled timer; ignored");
+            } else {
+                handle(action);
+            }
         }
         return LRESULT(0);
     }
@@ -257,6 +312,7 @@ fn handle(action: Action) {
             with_app(|app| {
                 app.flyout = None;
                 app.pending_shot = None;
+                app.timer_epoch.cancel();
             });
             // SAFETY: posts WM_QUIT to this (UI) thread's queue.
             unsafe { PostQuitMessage(0) };
@@ -382,5 +438,41 @@ mod tests {
         }
         assert_eq!(Action::from_u32(0), None);
         assert_eq!(Action::from_u32(all.len() as u32 + 1), None);
+    }
+
+    #[test]
+    fn only_the_timer_armed_last_is_current() {
+        let mut epoch = TimerEpoch::default();
+        let first = epoch.arm();
+        assert!(epoch.is_current(first));
+        // A newer timer supersedes the older one.
+        let second = epoch.arm();
+        assert!(epoch.is_current(second));
+        assert!(!epoch.is_current(first));
+    }
+
+    #[test]
+    fn a_cancelled_timer_stays_stale_after_the_next_one_is_armed() {
+        // Regression: Stop during a countdown, then a new recording. The first countdown's
+        // thread still posts; it must neither be honoured nor mistaken for the new timer.
+        let mut epoch = TimerEpoch::default();
+        let cancelled = epoch.arm();
+        epoch.cancel();
+        assert!(!epoch.is_current(cancelled));
+        let next = epoch.arm();
+        assert!(epoch.is_current(next));
+        assert!(!epoch.is_current(cancelled));
+        // A plain `post` (lParam 0) is never a valid token once any timer was armed.
+        assert!(!epoch.is_current(0));
+    }
+
+    #[test]
+    fn timer_tokens_wrap_without_panicking() {
+        let mut epoch = TimerEpoch(u32::MAX);
+        let before = u32::MAX;
+        let token = epoch.arm();
+        assert_eq!(token, 0);
+        assert!(epoch.is_current(token));
+        assert!(!epoch.is_current(before));
     }
 }
