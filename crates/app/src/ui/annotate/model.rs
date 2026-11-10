@@ -4,9 +4,9 @@
 //!
 //! All coordinates in the model are **image pixels** (top-left origin).
 //!
-//! Items come in two layers. *Pixel* items ([`Item::Pixelate`], [`Item::Highlight`]) change the
-//! screenshot's pixels themselves ([`apply_pixel_layer`]); the window then draws the *vector*
-//! items (outlines, arrows, text) on top. Save and Copy export both layers, so a redaction is
+//! Items come in two layers. *Pixel* items ([`Item::Pixelate`], [`Item::BlackBox`],
+//! [`Item::Highlight`], [`Item::Spotlight`]) change the screenshot's pixels themselves ([`apply_pixel_layer`]); the window then draws the *vector*
+//! items (outlines, ellipses, lines, arrows, text) on top. Save and Copy export both layers, so a redaction is
 //! part of the file, not an overlay that could be lifted off.
 //!
 //! Each tool remembers its own [`Style`] (colour from a small fixed [`Color`] palette, and a
@@ -24,6 +24,10 @@ pub const PIXELATE_BLOCK: u32 = 12;
 
 /// Highlighter opacity (102/255 = 40 %): the text underneath stays readable.
 pub const HIGHLIGHT_ALPHA: u8 = 102;
+
+/// How dark everything outside the spotlights gets (140/255 = 55 % black): clearly in the
+/// background, still readable as context.
+pub const SPOTLIGHT_ALPHA: u8 = 140;
 
 /// The fixed colour palette.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -129,17 +133,22 @@ impl Style {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tool {
-    /// Click an annotation to select it; drag to move it, `Delete` to remove it.
+    /// Click an annotation to select it; drag it to move it, drag one of its handles to resize
+    /// it, `Delete` to remove it.
     Select,
     /// Drag the part of the screenshot to keep; Save and Copy cut the rest off. A click (no drag)
     /// removes the crop.
     Crop,
     /// Draw a rectangle outline.
     Rect,
+    /// Drag a box; an ellipse outline is drawn inside it.
+    Ellipse,
     /// Draw a rectangle, then type text inside it.
     Text,
     /// Drag from the tail to the point of an arrow.
     Arrow,
+    /// Drag from one end to the other of a straight line (an arrow without a head).
+    Line,
     /// Drag a translucent highlighter box over the screenshot.
     Highlight,
     /// Drag a rectangle whose pixels are pixelated (irreversibly) in the saved/copied image.
@@ -147,20 +156,26 @@ pub enum Tool {
     /// Drag a rectangle that is filled solid black in the saved/copied image: the strongest
     /// redaction, for what pixelation could leave recognisable.
     BlackBox,
+    /// Drag a box that stays as it is while everything outside it (and outside every other
+    /// spotlight) is darkened in the saved/copied image.
+    Spotlight,
     /// Click to place the next numbered step marker (①, ②, …).
     Step,
 }
 
 impl Tool {
-    pub const ALL: [Tool; 9] = [
+    pub const ALL: [Tool; 12] = [
         Tool::Select,
         Tool::Crop,
         Tool::Rect,
+        Tool::Ellipse,
         Tool::Text,
         Tool::Arrow,
+        Tool::Line,
         Tool::Highlight,
         Tool::Pixelate,
         Tool::BlackBox,
+        Tool::Spotlight,
         Tool::Step,
     ];
 
@@ -169,12 +184,15 @@ impl Tool {
             Tool::Select => 0,
             Tool::Crop => 1,
             Tool::Rect => 2,
-            Tool::Text => 3,
-            Tool::Arrow => 4,
-            Tool::Highlight => 5,
-            Tool::Pixelate => 6,
-            Tool::BlackBox => 7,
-            Tool::Step => 8,
+            Tool::Ellipse => 3,
+            Tool::Text => 4,
+            Tool::Arrow => 5,
+            Tool::Line => 6,
+            Tool::Highlight => 7,
+            Tool::Pixelate => 8,
+            Tool::BlackBox => 9,
+            Tool::Spotlight => 10,
+            Tool::Step => 11,
         }
     }
 
@@ -189,19 +207,23 @@ impl Tool {
         }
     }
 
-    /// Whether the palette applies (a pixelate area has no colour; a black box is always black).
-    /// For Select it depends on the selected item: see [`Editor::color_enabled`].
+    /// Whether the palette applies (a pixelate area has no colour; a black box is always black,
+    /// a spotlight always darkens). For Select it depends on the selected item: see
+    /// [`Editor::color_enabled`].
     pub fn uses_color(self) -> bool {
         !matches!(
             self,
-            Tool::Select | Tool::Crop | Tool::Pixelate | Tool::BlackBox
+            Tool::Select | Tool::Crop | Tool::Pixelate | Tool::BlackBox | Tool::Spotlight
         )
     }
 
-    /// Whether the thickness applies (highlight, pixelate and black box are filled areas; for a
-    /// step marker it sets the size).
+    /// Whether the thickness applies (highlight, pixelate, black box and spotlight are areas;
+    /// for a step marker it sets the size).
     pub fn uses_thickness(self) -> bool {
-        matches!(self, Tool::Rect | Tool::Text | Tool::Arrow | Tool::Step)
+        matches!(
+            self,
+            Tool::Rect | Tool::Ellipse | Tool::Text | Tool::Arrow | Tool::Line | Tool::Step
+        )
     }
 }
 
@@ -209,6 +231,8 @@ impl Tool {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Item {
     Rect(Rect, Style),
+    /// An ellipse outline inscribed in the rectangle.
+    Ellipse(Rect, Style),
     /// Text in the style's colour inside a border of the style's thickness.
     Text {
         rect: Rect,
@@ -221,12 +245,21 @@ pub enum Item {
         to: Point,
         style: Style,
     },
+    /// A straight line between two points, without a head.
+    Line {
+        from: Point,
+        to: Point,
+        style: Style,
+    },
     /// A translucent highlighter box, blended into the pixels by [`apply_pixel_layer`].
     Highlight(Rect, Color),
     /// A redacted area: pixelated in [`PIXELATE_BLOCK`] squares by [`apply_pixel_layer`].
     Pixelate(Rect),
     /// A redacted area filled solid black by [`apply_pixel_layer`].
     BlackBox(Rect),
+    /// An area to draw the eye to: [`apply_pixel_layer`] darkens everything that is outside
+    /// every spotlight ([`spotlight_keep`] is the area one keeps).
+    Spotlight(Rect),
     /// A numbered circle centred on `at`, filled with the style's colour; the thickness sets
     /// its size ([`Thickness::step_diameter`]).
     Step {
@@ -241,23 +274,25 @@ impl Item {
     pub fn is_pixel(&self) -> bool {
         matches!(
             self,
-            Item::Highlight(..) | Item::Pixelate(_) | Item::BlackBox(_)
+            Item::Highlight(..) | Item::Pixelate(_) | Item::BlackBox(_) | Item::Spotlight(_)
         )
     }
 
     /// The item's style, for the toolbar while it is selected. A highlight reports its colour
-    /// (its line is unused); pixelate and black box have none.
+    /// (its line is unused); pixelate, black box and spotlight have none.
     pub fn style(&self) -> Option<Style> {
         match self {
             Item::Rect(_, style)
+            | Item::Ellipse(_, style)
             | Item::Text { style, .. }
             | Item::Arrow { style, .. }
+            | Item::Line { style, .. }
             | Item::Step { style, .. } => Some(*style),
             Item::Highlight(_, color) => Some(Style {
                 color: *color,
                 ..Style::DEFAULT
             }),
-            Item::Pixelate(_) | Item::BlackBox(_) => None,
+            Item::Pixelate(_) | Item::BlackBox(_) | Item::Spotlight(_) => None,
         }
     }
 
@@ -268,7 +303,12 @@ impl Item {
     pub fn uses_thickness(&self) -> bool {
         matches!(
             self,
-            Item::Rect(..) | Item::Text { .. } | Item::Arrow { .. } | Item::Step { .. }
+            Item::Rect(..)
+                | Item::Ellipse(..)
+                | Item::Text { .. }
+                | Item::Arrow { .. }
+                | Item::Line { .. }
+                | Item::Step { .. }
         )
     }
 
@@ -277,11 +317,13 @@ impl Item {
         let mut item = self.clone();
         match &mut item {
             Item::Rect(_, style)
+            | Item::Ellipse(_, style)
             | Item::Text { style, .. }
             | Item::Arrow { style, .. }
+            | Item::Line { style, .. }
             | Item::Step { style, .. } => style.color = color,
             Item::Highlight(_, c) => *c = color,
-            Item::Pixelate(_) | Item::BlackBox(_) => {}
+            Item::Pixelate(_) | Item::BlackBox(_) | Item::Spotlight(_) => {}
         }
         item
     }
@@ -290,8 +332,10 @@ impl Item {
     fn rethickened(&self, thickness: Thickness) -> Item {
         let mut item = self.clone();
         if let Item::Rect(_, style)
+        | Item::Ellipse(_, style)
         | Item::Text { style, .. }
         | Item::Arrow { style, .. }
+        | Item::Line { style, .. }
         | Item::Step { style, .. } = &mut item
         {
             style.thickness = thickness;
@@ -300,7 +344,7 @@ impl Item {
     }
 
     /// The area the item covers (the selection frame goes around it): its rectangle, the box
-    /// spanned by an arrow's ends, a step marker's circle.
+    /// spanned by the ends of an arrow or a line, a step marker's circle.
     pub fn bounds(&self) -> Rect {
         match self {
             Item::Step { at, style, .. } => {
@@ -316,12 +360,75 @@ impl Item {
     fn anchor(&self) -> Rect {
         match self {
             Item::Rect(r, _)
+            | Item::Ellipse(r, _)
             | Item::Text { rect: r, .. }
             | Item::Highlight(r, _)
             | Item::Pixelate(r)
-            | Item::BlackBox(r) => *r,
-            Item::Arrow { from, to, .. } => Rect::from_points(*from, *to),
+            | Item::BlackBox(r)
+            | Item::Spotlight(r) => *r,
+            Item::Arrow { from, to, .. } | Item::Line { from, to, .. } => {
+                Rect::from_points(*from, *to)
+            }
             Item::Step { at, .. } => Rect::new(at.x, at.y, 0, 0),
+        }
+    }
+
+    /// The rectangle of an item that is a box (resized by eight handles), if it is one.
+    fn box_rect(&self) -> Option<Rect> {
+        match self {
+            Item::Rect(r, _)
+            | Item::Ellipse(r, _)
+            | Item::Text { rect: r, .. }
+            | Item::Highlight(r, _)
+            | Item::Pixelate(r)
+            | Item::BlackBox(r)
+            | Item::Spotlight(r) => Some(*r),
+            Item::Arrow { .. } | Item::Line { .. } | Item::Step { .. } => None,
+        }
+    }
+
+    /// The two ends of a line-like item (resized by a handle on each), if it is one.
+    fn ends(&self) -> Option<(Point, Point)> {
+        match self {
+            Item::Arrow { from, to, .. } | Item::Line { from, to, .. } => Some((*from, *to)),
+            _ => None,
+        }
+    }
+
+    /// The item with its box replaced (unchanged when it is not a box).
+    fn with_box(&self, new: Rect) -> Item {
+        let mut item = self.clone();
+        if let Item::Rect(r, _)
+        | Item::Ellipse(r, _)
+        | Item::Text { rect: r, .. }
+        | Item::Highlight(r, _)
+        | Item::Pixelate(r)
+        | Item::BlackBox(r)
+        | Item::Spotlight(r) = &mut item
+        {
+            *r = new;
+        }
+        item
+    }
+
+    /// The item with its two ends replaced (unchanged when it has none).
+    fn with_ends(&self, a: Point, b: Point) -> Item {
+        let mut item = self.clone();
+        if let Item::Arrow { from, to, .. } | Item::Line { from, to, .. } = &mut item {
+            (*from, *to) = (a, b);
+        }
+        item
+    }
+
+    /// Where the item can be grabbed to resize it: the corners and edge midpoints of a box, the
+    /// two ends of an arrow or a line. A step marker has none (its size comes from the line thickness).
+    pub fn handles(&self) -> Vec<(Handle, Point)> {
+        if let Some(r) = self.box_rect() {
+            Handle::BOX.iter().map(|h| (*h, h.on_box(r))).collect()
+        } else if let Some((a, b)) = self.ends() {
+            vec![(Handle::Start, a), (Handle::End, b)]
+        } else {
+            Vec::new()
         }
     }
 
@@ -331,6 +438,12 @@ impl Item {
         let mp = |p: &Point| Point::new(p.x + dx, p.y + dy);
         match self {
             Item::Rect(r, style) => Item::Rect(mv(r), *style),
+            Item::Ellipse(r, style) => Item::Ellipse(mv(r), *style),
+            Item::Line { from, to, style } => Item::Line {
+                from: mp(from),
+                to: mp(to),
+                style: *style,
+            },
             Item::Text { rect, text, style } => Item::Text {
                 rect: mv(rect),
                 text: text.clone(),
@@ -344,6 +457,7 @@ impl Item {
             Item::Highlight(r, color) => Item::Highlight(mv(r), *color),
             Item::Pixelate(r) => Item::Pixelate(mv(r)),
             Item::BlackBox(r) => Item::BlackBox(mv(r)),
+            Item::Spotlight(r) => Item::Spotlight(mv(r)),
             Item::Step { at, number, style } => Item::Step {
                 at: mp(at),
                 number: *number,
@@ -353,8 +467,10 @@ impl Item {
     }
 
     /// Whether a click at `p` picks this item, allowing `slop` image pixels of slack. Filled
-    /// items and text boxes are picked anywhere inside; a rectangle outline only near its edge
-    /// (so whatever is inside it can still be clicked); an arrow near its shaft or head.
+    /// items and text boxes are picked anywhere inside; a rectangle or ellipse outline only near
+    /// its edge (so whatever is inside it can still be clicked), and so is a spotlight, whose
+    /// inside is the untouched screenshot; an arrow near its shaft or head; a line near the
+    /// line.
     pub fn hit(&self, p: Point, slop: i32) -> bool {
         let grow =
             |r: &Rect, d: i32| Rect::new(r.x - d, r.y - d, r.width + 2 * d, r.height + 2 * d);
@@ -362,6 +478,16 @@ impl Item {
             Item::Rect(r, style) => {
                 let inner = grow(r, -(style.thickness.px() + slop));
                 grow(r, slop).contains(p) && (inner.is_empty() || !inner.contains(p))
+            }
+            Item::Spotlight(r) => {
+                let inner = grow(r, -slop);
+                grow(r, slop).contains(p) && (inner.is_empty() || !inner.contains(p))
+            }
+            Item::Ellipse(r, style) => {
+                in_ellipse(*r, slop, p) && !in_ellipse(*r, -(style.thickness.px() + slop), p)
+            }
+            Item::Line { from, to, style } => {
+                dist_to_segment(p, *from, *to) <= f64::from(slop + style.thickness.px() / 2 + 1)
             }
             Item::Text { rect: r, .. }
             | Item::Highlight(r, _)
@@ -381,6 +507,24 @@ impl Item {
     }
 }
 
+/// Whether `p` is inside the ellipse inscribed in `r` grown by `d` on every side (shrunk for a
+/// negative `d`; an ellipse shrunk to nothing contains no point).
+fn in_ellipse(r: Rect, d: i32, p: Point) -> bool {
+    let (a, b) = (
+        f64::from(r.width) / 2.0 + f64::from(d),
+        f64::from(r.height) / 2.0 + f64::from(d),
+    );
+    if a <= 0.0 || b <= 0.0 {
+        return false;
+    }
+    let (cx, cy) = (
+        f64::from(r.x) + f64::from(r.width) / 2.0,
+        f64::from(r.y) + f64::from(r.height) / 2.0,
+    );
+    let (nx, ny) = ((f64::from(p.x) - cx) / a, (f64::from(p.y) - cy) / b);
+    nx * nx + ny * ny <= 1.0
+}
+
 fn dist(a: Point, b: Point) -> f64 {
     f64::from(a.x - b.x).hypot(f64::from(a.y - b.y))
 }
@@ -397,6 +541,170 @@ fn dist_to_segment(p: Point, a: Point, b: Point) -> f64 {
     (f64::from(p.x) - cx).hypot(f64::from(p.y) - cy)
 }
 
+/// A point on the selected item that resizes it when dragged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Handle {
+    TopLeft,
+    Top,
+    TopRight,
+    Right,
+    BottomRight,
+    Bottom,
+    BottomLeft,
+    Left,
+    /// The tail of an arrow; the end of a line where its drag started.
+    Start,
+    /// The point of an arrow; the other end of a line.
+    End,
+}
+
+impl Handle {
+    /// The eight handles of a box, clockwise from the top-left corner.
+    pub const BOX: [Handle; 8] = [
+        Handle::TopLeft,
+        Handle::Top,
+        Handle::TopRight,
+        Handle::Right,
+        Handle::BottomRight,
+        Handle::Bottom,
+        Handle::BottomLeft,
+        Handle::Left,
+    ];
+
+    /// Which edges of a box the handle moves, per axis: -1 the left / top edge, 1 the right /
+    /// bottom edge, 0 neither. `(0, 0)` for the handles of a line.
+    fn edges(self) -> (i32, i32) {
+        match self {
+            Handle::TopLeft => (-1, -1),
+            Handle::Top => (0, -1),
+            Handle::TopRight => (1, -1),
+            Handle::Right => (1, 0),
+            Handle::BottomRight => (1, 1),
+            Handle::Bottom => (0, 1),
+            Handle::BottomLeft => (-1, 1),
+            Handle::Left => (-1, 0),
+            Handle::Start | Handle::End => (0, 0),
+        }
+    }
+
+    /// Where the handle sits on the box `r`.
+    fn on_box(self, r: Rect) -> Point {
+        let along = |edge: i32, lo: i32, len: i32| match edge {
+            -1 => lo,
+            1 => lo + len,
+            _ => lo + len / 2,
+        };
+        let (ex, ey) = self.edges();
+        Point::new(along(ex, r.x, r.width), along(ey, r.y, r.height))
+    }
+}
+
+/// The mouse pointer over a [`Handle`]: the direction it resizes in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResizeCursor {
+    /// ↖↘ (top-left and bottom-right corners).
+    NwSe,
+    /// ↗↙ (top-right and bottom-left corners).
+    NeSw,
+    /// ↔ (left and right edges).
+    WestEast,
+    /// ↕ (top and bottom edges).
+    NorthSouth,
+}
+
+/// The cursor for the end of a line from `fixed` to `end`: along the line, to the nearest of
+/// the four directions a resize cursor has.
+fn line_cursor(fixed: Point, end: Point) -> ResizeCursor {
+    let (dx, dy) = (i64::from(end.x - fixed.x), i64::from(end.y - fixed.y));
+    // Within ~27° of level or upright (the slope is under 1/2): the straight cursors.
+    if dx.abs() >= 2 * dy.abs() {
+        ResizeCursor::WestEast
+    } else if dy.abs() >= 2 * dx.abs() {
+        ResizeCursor::NorthSouth
+    } else if (dx > 0) == (dy > 0) {
+        ResizeCursor::NwSe
+    } else {
+        ResizeCursor::NeSw
+    }
+}
+
+/// `item` resized by dragging `handle` to `p`, inside a `width × height` image. Pure, and
+/// always computed from the item as it was when the drag started, so the limits below never
+/// accumulate.
+///
+/// A box keeps the edges the handle does not move. The handle may be dragged past the opposite
+/// edge: the box flips (it is stored normalized). It never gets smaller than [`MIN_SIZE`] on an
+/// axis the handle moves: nearer than that to the opposite edge, the moved edge waits
+/// `MIN_SIZE` away on the side it started from. An end of an arrow follows the pointer the same
+/// way, staying at least `MIN_SIZE` from the other end. `p` is clamped to the image, so the
+/// result stays inside it. An item without the handle (a step marker) is returned unchanged.
+pub fn resized(item: &Item, handle: Handle, p: Point, width: i32, height: i32) -> Item {
+    let (max_x, max_y) = ((width - 1).max(0), (height - 1).max(0));
+    let p = Point::new(p.x.clamp(0, max_x), p.y.clamp(0, max_y));
+    if let Some(r) = item.box_rect() {
+        let (ex, ey) = handle.edges();
+        let (x, w) = resized_span(r.x, r.width, ex, p.x, max_x);
+        let (y, h) = resized_span(r.y, r.height, ey, p.y, max_y);
+        return item.with_box(Rect::new(x, y, w, h));
+    }
+    let Some((a, b)) = item.ends() else {
+        return item.clone();
+    };
+    match handle {
+        Handle::Start => item.with_ends(resized_end(b, a, p, max_x, max_y), b),
+        Handle::End => item.with_ends(a, resized_end(a, b, p, max_x, max_y)),
+        _ => item.clone(),
+    }
+}
+
+/// One axis of a box resize: the span `lo .. lo + len` with the edge chosen by `edge` (-1 the
+/// low one, 1 the high one, 0 none) moved to `to`, as `(lo, len)`; `max` is the last pixel of
+/// the image on this axis.
+fn resized_span(lo: i32, len: i32, edge: i32, to: i32, max: i32) -> (i32, i32) {
+    let (fixed, moved) = match edge {
+        -1 => (lo + len, lo),
+        1 => (lo, lo + len),
+        _ => return (lo, len),
+    };
+    let to = if (to - fixed).abs() >= MIN_SIZE {
+        to
+    } else if moved >= fixed {
+        fixed + MIN_SIZE
+    } else {
+        fixed - MIN_SIZE
+    };
+    // The side the edge started on has room for MIN_SIZE (the item was that large), so this
+    // clamp only matters for an item that was too small to begin with.
+    let to = to.clamp(0, max);
+    (fixed.min(to), (to - fixed).abs())
+}
+
+/// An end of a line dragged to `p`, the other end staying at `fixed`; `was` is where the end
+/// started. Nearer than [`MIN_SIZE`] to `fixed`, the end stops `MIN_SIZE` out in the pointer's
+/// direction, or where it started if that point is not available.
+fn resized_end(fixed: Point, was: Point, p: Point, max_x: i32, max_y: i32) -> Point {
+    if arrow_long_enough(fixed, p) {
+        return p;
+    }
+    let (dx, dy) = (f64::from(p.x - fixed.x), f64::from(p.y - fixed.y));
+    let len = dx.hypot(dy);
+    if len == 0.0 {
+        return was;
+    }
+    // Rounded away from `fixed` on both axes, so the result is never shorter than MIN_SIZE.
+    let out = |d: f64| {
+        let v = d * f64::from(MIN_SIZE) / len;
+        (if v >= 0.0 { v.ceil() } else { v.floor() }) as i32
+    };
+    let q = Point::new(fixed.x + out(dx), fixed.y + out(dy));
+    let inside = (0..=max_x).contains(&q.x) && (0..=max_y).contains(&q.y);
+    if inside && arrow_long_enough(fixed, q) {
+        q
+    } else {
+        was
+    }
+}
+
 /// A one-key shortcut, available while no text box is being typed into (then keys are text).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Shortcut {
@@ -406,19 +714,23 @@ pub enum Shortcut {
     Thicker,
 }
 
-/// The shortcut for a typed character: `S` `C` `R` `T` `A` `H` `P` `B` `N` pick a tool, `1`–`6` a colour,
-/// `[` / `]` step the thickness. Case-insensitive. Characters (not key codes) are matched, so
+/// The shortcut for a typed character: `S` `C` `R` `E` `T` `A` `L` `H` `P` `B` `F` `N` pick a
+/// tool (`F` for "focus" is the spotlight: `S` is Select), `1`–`6` a colour, `[` / `]` step the
+/// thickness. Case-insensitive. Characters (not key codes) are matched, so
 /// the keys work the same on any keyboard layout.
 pub fn shortcut(c: char) -> Option<Shortcut> {
     Some(match c.to_ascii_lowercase() {
         's' => Shortcut::Tool(Tool::Select),
         'c' => Shortcut::Tool(Tool::Crop),
         'r' => Shortcut::Tool(Tool::Rect),
+        'e' => Shortcut::Tool(Tool::Ellipse),
+        'l' => Shortcut::Tool(Tool::Line),
         't' => Shortcut::Tool(Tool::Text),
         'a' => Shortcut::Tool(Tool::Arrow),
         'h' => Shortcut::Tool(Tool::Highlight),
         'p' => Shortcut::Tool(Tool::Pixelate),
         'b' => Shortcut::Tool(Tool::BlackBox),
+        'f' => Shortcut::Tool(Tool::Spotlight),
         'n' => Shortcut::Tool(Tool::Step),
         '[' => Shortcut::Thinner,
         ']' => Shortcut::Thicker,
@@ -464,14 +776,16 @@ impl Doc {
     }
 }
 
-/// A selected item being dragged to a new place.
+/// A selected item being dragged to a new place, or resized by one of its handles.
 #[derive(Debug)]
 struct Moving {
     index: usize,
-    /// The item where the drag started; each step moves this copy, so clamping at an edge
-    /// never accumulates.
+    /// The item where the drag started; each step moves (or resizes) this copy, so clamping at
+    /// an edge never accumulates.
     original: Item,
     start: Point,
+    /// The handle being dragged and where it was at the start, for a resize; `None` for a move.
+    handle: Option<(Handle, Point)>,
     /// All items before the move, for undo.
     before: Vec<Item>,
 }
@@ -582,6 +896,60 @@ impl Editor {
             .map(|(i, _)| i)
     }
 
+    /// The resize handles to show on the selected item (image px). The midpoint handles of a
+    /// side too short to tell them from the corners (under four times the hit slack) are left
+    /// out, so a small box keeps a middle to drag it by.
+    pub fn handles(&self) -> Vec<(Handle, Point)> {
+        let Some(item) = self.selected() else {
+            return Vec::new();
+        };
+        let b = item.bounds();
+        let room = 4 * self.slop;
+        item.handles()
+            .into_iter()
+            .filter(|(h, _)| match h {
+                Handle::Top | Handle::Bottom => b.width >= room,
+                Handle::Left | Handle::Right => b.height >= room,
+                _ => true,
+            })
+            .collect()
+    }
+
+    /// The handle of the selected item at `p`, with the same slack as [`Editor::hit_test`] on
+    /// each axis (the handles are drawn as squares); the nearest one where two are in reach.
+    pub fn handle_at(&self, p: Point) -> Option<Handle> {
+        self.handle_and_place(self.clamp(p)).map(|(h, _)| h)
+    }
+
+    fn handle_and_place(&self, p: Point) -> Option<(Handle, Point)> {
+        let reach = |at: &Point| (at.x - p.x).abs().max((at.y - p.y).abs());
+        self.handles()
+            .into_iter()
+            .filter(|(_, at)| reach(at) <= self.slop)
+            .min_by_key(|(_, at)| {
+                let (dx, dy) = (i64::from(at.x - p.x), i64::from(at.y - p.y));
+                dx * dx + dy * dy
+            })
+    }
+
+    /// The cursor to show at `p` when it is over a handle of the selected item.
+    pub fn resize_cursor(&self, p: Point) -> Option<ResizeCursor> {
+        Some(match self.handle_at(p)? {
+            Handle::TopLeft | Handle::BottomRight => ResizeCursor::NwSe,
+            Handle::TopRight | Handle::BottomLeft => ResizeCursor::NeSw,
+            Handle::Left | Handle::Right => ResizeCursor::WestEast,
+            Handle::Top | Handle::Bottom => ResizeCursor::NorthSouth,
+            end @ (Handle::Start | Handle::End) => {
+                let (a, b) = self.selected()?.ends()?;
+                if end == Handle::Start {
+                    line_cursor(b, a)
+                } else {
+                    line_cursor(a, b)
+                }
+            }
+        })
+    }
+
     /// The style the toolbar shows: the selected item's (Select tool), otherwise the current
     /// tool's — what the next shape will look like.
     pub fn style(&self) -> Style {
@@ -670,7 +1038,13 @@ impl Editor {
         Some(match self.tool {
             Tool::Select | Tool::Crop => return None,
             Tool::Rect | Tool::Text => Item::Rect(r, style),
+            Tool::Ellipse => Item::Ellipse(r, style),
             Tool::Arrow => Item::Arrow {
+                from: a,
+                to: b,
+                style,
+            },
+            Tool::Line => Item::Line {
                 from: a,
                 to: b,
                 style,
@@ -678,6 +1052,7 @@ impl Editor {
             Tool::Highlight => Item::Highlight(r, style.color),
             Tool::Pixelate => Item::Pixelate(r),
             Tool::BlackBox => Item::BlackBox(r),
+            Tool::Spotlight => Item::Spotlight(r),
             Tool::Step => Item::Step {
                 at: b,
                 number: self.next_step_number(),
@@ -715,12 +1090,18 @@ impl Editor {
         self.commit_typing();
         let p = self.clamp(p);
         if self.tool == Tool::Select {
-            self.selected = self.hit_test(p);
+            // A handle of the item that is already selected resizes it; anything else selects
+            // (and moves) what is under the pointer.
+            let handle = self.handle_and_place(p);
+            if handle.is_none() {
+                self.selected = self.hit_test(p);
+            }
             self.moving = self.selected.and_then(|index| {
                 Some(Moving {
                     index,
                     original: self.items.get(index)?.clone(),
                     start: p,
+                    handle,
                     before: self.items.clone(),
                 })
             });
@@ -732,7 +1113,19 @@ impl Editor {
     pub fn on_move(&mut self, p: Point) {
         let p = self.clamp(p);
         if let Some(m) = &self.moving {
-            let moved = self.moved(&m.original, p.x - m.start.x, p.y - m.start.y);
+            let (dx, dy) = (p.x - m.start.x, p.y - m.start.y);
+            let moved = match m.handle {
+                // The handle goes where it was plus the pointer's travel, so a click on a
+                // handle (grabbed a little off its centre) changes nothing.
+                Some((handle, at)) => resized(
+                    &m.original,
+                    handle,
+                    Point::new(at.x + dx, at.y + dy),
+                    self.width,
+                    self.height,
+                ),
+                None => self.moved(&m.original, dx, dy),
+            };
             let index = m.index;
             if let Some(item) = self.items.get_mut(index) {
                 *item = moved;
@@ -755,9 +1148,52 @@ impl Editor {
         item.translated(dx, dy)
     }
 
-    /// The index of the item being dragged by the Select tool, if any.
+    /// The index of the item being dragged (moved or resized) by the Select tool, if any.
     pub fn moving_index(&self) -> Option<usize> {
         self.moving.as_ref().map(|m| m.index)
+    }
+
+    /// The pixel items the canvas shows baked into its pixels right now: all of them, except
+    /// the one being dragged (moved or resized) by the Select tool — and, while any spotlight is
+    /// being drawn or dragged, every spotlight. What is left out is drawn live instead (see
+    /// [`Editor::preview`] and [`Editor::live_spotlights`]), so a drag rebuilds the canvas once
+    /// when it starts and once when it ends, not on every mouse move.
+    pub fn canvas_pixels(&self) -> Vec<Item> {
+        let moving = self.moving_index();
+        let live = self.spotlight_in_hand();
+        self.items
+            .iter()
+            .enumerate()
+            .filter(|&(i, item)| {
+                item.is_pixel()
+                    && Some(i) != moving
+                    && !(live && matches!(item, Item::Spotlight(_)))
+            })
+            .map(|(_, item)| item.clone())
+            .collect()
+    }
+
+    /// While a spotlight is being drawn, moved or resized: the areas to keep bright (those of
+    /// all spotlights, with the one in hand where it is now), for the window to darken the rest
+    /// live. Darkening cannot be undone on screen, so the committed spotlights are redrawn this
+    /// way too (they are left out of [`Editor::canvas_pixels`] meanwhile). `None` otherwise.
+    pub fn live_spotlights(&self) -> Option<Vec<Rect>> {
+        if !self.spotlight_in_hand() {
+            return None;
+        }
+        let drawn = match self.preview() {
+            Some(Item::Spotlight(r)) => Some(spotlight_keep(r)),
+            _ => None,
+        };
+        Some(spotlight_areas(&self.items).chain(drawn).collect())
+    }
+
+    fn spotlight_in_hand(&self) -> bool {
+        (self.tool == Tool::Spotlight && self.drag.is_some())
+            || self
+                .moving
+                .as_ref()
+                .is_some_and(|m| matches!(m.original, Item::Spotlight(_)))
     }
 
     /// True while the mouse button is down on something being drawn or moved.
@@ -782,7 +1218,8 @@ impl Editor {
 
     /// Finish the drag. A big-enough shape is committed (or, for the Text tool, becomes a text
     /// box awaiting typing); a tiny one — an accidental click — is discarded. Boxes need
-    /// [`MIN_SIZE`] on both axes, an arrow needs that length (a level arrow has no height). A
+    /// [`MIN_SIZE`] on both axes, an arrow or a line needs that length (a level one has no
+    /// height). A
     /// move that changed something becomes one undo step.
     pub fn on_up(&mut self, p: Point) {
         self.on_move(p);
@@ -820,12 +1257,13 @@ impl Editor {
             });
             return;
         }
-        if self.tool == Tool::Arrow {
+        if matches!(self.tool, Tool::Arrow | Tool::Line) {
             if arrow_long_enough(a, b) {
-                self.push(Item::Arrow {
-                    from: a,
-                    to: b,
-                    style,
+                let (from, to) = (a, b);
+                self.push(if self.tool == Tool::Arrow {
+                    Item::Arrow { from, to, style }
+                } else {
+                    Item::Line { from, to, style }
                 });
             }
             return;
@@ -836,10 +1274,12 @@ impl Editor {
         }
         match self.tool {
             Tool::Rect => self.push(Item::Rect(r, style)),
+            Tool::Ellipse => self.push(Item::Ellipse(r, style)),
             Tool::Highlight => self.push(Item::Highlight(r, style.color)),
             Tool::Pixelate => self.push(Item::Pixelate(r)),
             Tool::BlackBox => self.push(Item::BlackBox(r)),
-            Tool::Arrow | Tool::Select | Tool::Step | Tool::Crop => {} // handled above
+            Tool::Spotlight => self.push(Item::Spotlight(r)),
+            Tool::Arrow | Tool::Line | Tool::Select | Tool::Step | Tool::Crop => {} // handled above
             Tool::Text => {
                 self.typing = Some(Typing {
                     rect: r,
@@ -1018,9 +1458,29 @@ impl Editor {
     }
 }
 
+/// The area a spotlight keeps as it is: its box with both corner pixels included (like a
+/// crop), so a spotlight dragged into a corner of the image leaves no darkened line of pixels
+/// along the edge.
+pub fn spotlight_keep(r: Rect) -> Rect {
+    Rect::new(r.x, r.y, r.width + 1, r.height + 1)
+}
+
+/// The kept areas of every spotlight in `items`.
+fn spotlight_areas(items: &[Item]) -> impl Iterator<Item = Rect> + '_ {
+    items.iter().filter_map(|item| match item {
+        Item::Spotlight(r) => Some(spotlight_keep(*r)),
+        _ => None,
+    })
+}
+
 /// The screenshot with the pixel items of `items` applied in order (a pixelate drawn over a
 /// highlight pixelates the highlight too, and the other way round). Vector items are ignored:
 /// the window draws them on top. Pure, so what Save and Copy export is unit-tested here.
+///
+/// Spotlights are the exception to "in order": together they darken, once and last, everything
+/// outside the union of their areas (by [`SPOTLIGHT_ALPHA`]). Two spotlights therefore never
+/// make the background darker than one, and a highlight or redaction outside them is dimmed
+/// like the rest of the background whenever it was drawn.
 pub fn apply_pixel_layer(img: &Rgba, items: &[Item]) -> Rgba {
     let mut out = img.clone();
     for item in items {
@@ -1030,13 +1490,24 @@ pub fn apply_pixel_layer(img: &Rgba, items: &[Item]) -> Rgba {
             Item::Highlight(r, color) => {
                 imaging::blend_rect_in_place(&mut out, *r, color.rgb(), HIGHLIGHT_ALPHA)
             }
-            Item::Rect(..) | Item::Text { .. } | Item::Arrow { .. } | Item::Step { .. } => {}
+            // Applied together below.
+            Item::Spotlight(_) => {}
+            Item::Rect(..)
+            | Item::Ellipse(..)
+            | Item::Text { .. }
+            | Item::Arrow { .. }
+            | Item::Line { .. }
+            | Item::Step { .. } => {}
         }
+    }
+    let keep: Vec<Rect> = spotlight_areas(items).collect();
+    if !keep.is_empty() {
+        imaging::dim_outside_in_place(&mut out, &keep, SPOTLIGHT_ALPHA);
     }
     out
 }
 
-/// An arrow counts once it is at least [`MIN_SIZE`] long, in any direction.
+/// An arrow (or a line) counts once it is at least [`MIN_SIZE`] long, in any direction.
 pub fn arrow_long_enough(from: Point, to: Point) -> bool {
     let (dx, dy) = (i64::from(to.x - from.x), i64::from(to.y - from.y));
     dx * dx + dy * dy >= i64::from(MIN_SIZE) * i64::from(MIN_SIZE)
@@ -1732,10 +2203,13 @@ mod tests {
         for tool in Tool::ALL.into_iter().filter(|t| *t != Tool::Select) {
             let lineless = matches!(
                 tool,
-                Tool::Crop | Tool::Highlight | Tool::Pixelate | Tool::BlackBox
+                Tool::Crop | Tool::Highlight | Tool::Pixelate | Tool::BlackBox | Tool::Spotlight
             );
             assert_eq!(tool.uses_thickness(), !lineless, "{tool:?}");
-            let colourless = matches!(tool, Tool::Crop | Tool::Pixelate | Tool::BlackBox);
+            let colourless = matches!(
+                tool,
+                Tool::Crop | Tool::Pixelate | Tool::BlackBox | Tool::Spotlight
+            );
             assert_eq!(tool.uses_color(), !colourless, "{tool:?}");
         }
     }
@@ -2529,5 +3003,1048 @@ mod tests {
         drag(&mut e, (5, 5), (40, 40));
         assert!(!e.doc().is_empty());
         assert_eq!(e.doc().crop, e.crop());
+    }
+
+    /// An editor with one committed item of `tool`, dragged from `a` to `b`, selected.
+    fn selected_item(tool: Tool, a: (i32, i32), b: (i32, i32), pick: (i32, i32)) -> Editor {
+        let mut e = Editor::new(200, 100);
+        e.set_tool(tool);
+        drag(&mut e, a, b);
+        e.set_tool(Tool::Select);
+        click(&mut e, pick.0, pick.1);
+        assert!(e.selected().is_some(), "the item is selected");
+        e
+    }
+
+    /// A black box (40,20)-(120,70), selected: 80 × 50.
+    fn selected_box() -> Editor {
+        selected_item(Tool::BlackBox, (40, 20), (120, 70), (80, 45))
+    }
+
+    #[test]
+    fn a_box_has_eight_handles_on_its_corners_and_edge_midpoints() {
+        let e = selected_box();
+        assert_eq!(
+            e.handles(),
+            vec![
+                (Handle::TopLeft, Point::new(40, 20)),
+                (Handle::Top, Point::new(80, 20)),
+                (Handle::TopRight, Point::new(120, 20)),
+                (Handle::Right, Point::new(120, 45)),
+                (Handle::BottomRight, Point::new(120, 70)),
+                (Handle::Bottom, Point::new(80, 70)),
+                (Handle::BottomLeft, Point::new(40, 70)),
+                (Handle::Left, Point::new(40, 45)),
+            ]
+        );
+        // Every kind of box has them.
+        let r = Rect::new(10, 10, 50, 40);
+        for item in [
+            Item::Rect(r, Style::DEFAULT),
+            Item::Text {
+                rect: r,
+                text: "x".into(),
+                style: Style::DEFAULT,
+            },
+            Item::Highlight(r, Color::Yellow),
+            Item::Pixelate(r),
+            Item::BlackBox(r),
+        ] {
+            assert_eq!(item.handles().len(), 8, "{item:?}");
+        }
+    }
+
+    #[test]
+    fn an_arrow_has_a_handle_on_each_end_and_a_step_marker_has_none() {
+        let arrow = Item::Arrow {
+            from: Point::new(20, 30),
+            to: Point::new(90, 60),
+            style: Style::DEFAULT,
+        };
+        assert_eq!(
+            arrow.handles(),
+            vec![
+                (Handle::Start, Point::new(20, 30)),
+                (Handle::End, Point::new(90, 60)),
+            ]
+        );
+        assert!(step(50, 50, 1).handles().is_empty());
+        // Nothing selected, or another tool: no handles to show.
+        let mut e = selected_box();
+        click(&mut e, 190, 95);
+        assert!(e.handles().is_empty());
+        let mut e = selected_box();
+        e.set_tool(Tool::Rect);
+        assert!(e.handles().is_empty());
+    }
+
+    #[test]
+    fn handles_are_hit_within_the_slack_and_the_nearest_one_wins() {
+        let mut e = selected_box();
+        e.set_hit_slop(4);
+        assert_eq!(e.handle_at(Point::new(40, 20)), Some(Handle::TopLeft));
+        assert_eq!(e.handle_at(Point::new(44, 16)), Some(Handle::TopLeft));
+        assert_eq!(e.handle_at(Point::new(45, 20)), None, "5 px: a miss");
+        assert_eq!(e.handle_at(Point::new(122, 47)), Some(Handle::Right));
+        assert_eq!(e.handle_at(Point::new(80, 45)), None, "the middle moves");
+        // The slack follows the zoom (the window converts screen px to image px).
+        e.set_hit_slop(8);
+        assert_eq!(e.handle_at(Point::new(47, 27)), Some(Handle::TopLeft));
+        // Between two handles in reach, the nearer one.
+        e.set_hit_slop(12);
+        assert_eq!(e.handle_at(Point::new(120, 31)), Some(Handle::TopRight));
+        assert_eq!(e.handle_at(Point::new(120, 34)), Some(Handle::Right));
+        // No selection, no handle.
+        click(&mut e, 190, 95);
+        assert_eq!(e.handle_at(Point::new(40, 20)), None);
+    }
+
+    #[test]
+    fn a_handle_on_the_image_edge_can_be_grabbed_from_outside_the_image() {
+        let mut e = selected_item(Tool::BlackBox, (150, 60), (199, 99), (170, 80));
+        e.set_hit_slop(4);
+        // The pointer is clamped to the image first, like every mouse position.
+        assert_eq!(e.handle_at(Point::new(230, 140)), Some(Handle::BottomRight));
+    }
+
+    #[test]
+    fn a_small_box_shows_only_the_handles_that_leave_room_to_move_it() {
+        let mut e = selected_item(Tool::BlackBox, (50, 30), (62, 90), (56, 60));
+        e.set_hit_slop(4); // a side needs 16 px for a midpoint handle
+        let kinds: Vec<Handle> = e.handles().into_iter().map(|(h, _)| h).collect();
+        assert_eq!(
+            kinds,
+            vec![
+                Handle::TopLeft,
+                Handle::TopRight,
+                Handle::Right,
+                Handle::BottomRight,
+                Handle::BottomLeft,
+                Handle::Left,
+            ],
+            "12 px wide: no top / bottom midpoints"
+        );
+        assert_eq!(e.handle_at(Point::new(56, 30)), None);
+    }
+
+    #[test]
+    fn dragging_a_corner_handle_resizes_the_box_as_one_undo_step() {
+        let mut e = selected_box();
+        e.on_down(Point::new(120, 70)); // bottom-right corner
+        assert!(e.is_dragging());
+        assert_eq!(
+            e.moving_index(),
+            Some(0),
+            "left out of the canvas meanwhile"
+        );
+        e.on_move(Point::new(100, 60));
+        assert_eq!(e.items()[0], Item::BlackBox(Rect::new(40, 20, 60, 40)));
+        e.on_move(Point::new(150, 90)); // live, from the original each time
+        e.on_up(Point::new(160, 95));
+        assert_eq!(e.items()[0], Item::BlackBox(Rect::new(40, 20, 120, 75)));
+        assert_eq!(e.selected(), Some(&e.items()[0]), "still selected");
+        assert!(e.undo());
+        assert_eq!(e.items()[0], Item::BlackBox(Rect::new(40, 20, 80, 50)));
+        assert!(e.redo());
+        assert_eq!(e.items()[0], Item::BlackBox(Rect::new(40, 20, 120, 75)));
+        assert!(e.undo());
+        assert!(e.undo(), "the step before the resize is drawing the box");
+        assert!(e.items().is_empty());
+    }
+
+    #[test]
+    fn an_edge_handle_moves_one_edge_only() {
+        let r = Rect::new(40, 20, 80, 50);
+        let item = Item::Rect(r, Style::DEFAULT);
+        let at = |h: Handle, x: i32, y: i32| resized(&item, h, Point::new(x, y), 200, 100);
+        // The pointer's other coordinate is ignored.
+        assert_eq!(
+            at(Handle::Left, 10, 99).bounds(),
+            Rect::new(10, 20, 110, 50)
+        );
+        assert_eq!(
+            at(Handle::Right, 150, 0).bounds(),
+            Rect::new(40, 20, 110, 50)
+        );
+        assert_eq!(at(Handle::Top, 0, 5).bounds(), Rect::new(40, 5, 80, 65));
+        assert_eq!(
+            at(Handle::Bottom, 199, 90).bounds(),
+            Rect::new(40, 20, 80, 70)
+        );
+        // Corners move two.
+        assert_eq!(
+            at(Handle::TopLeft, 30, 10).bounds(),
+            Rect::new(30, 10, 90, 60)
+        );
+        assert_eq!(
+            at(Handle::TopRight, 130, 10).bounds(),
+            Rect::new(40, 10, 90, 60)
+        );
+        assert_eq!(
+            at(Handle::BottomLeft, 30, 80).bounds(),
+            Rect::new(30, 20, 90, 60)
+        );
+        // The style and kind are kept.
+        assert_eq!(
+            at(Handle::Left, 10, 0),
+            Item::Rect(Rect::new(10, 20, 110, 50), Style::DEFAULT)
+        );
+    }
+
+    #[test]
+    fn dragging_a_handle_past_the_opposite_edge_flips_the_box() {
+        let item = Item::Highlight(Rect::new(40, 20, 80, 50), Color::Green);
+        // Left edge dragged to the right of the right edge (x = 120).
+        let flipped = resized(&item, Handle::Left, Point::new(170, 0), 200, 100);
+        assert_eq!(
+            flipped,
+            Item::Highlight(Rect::new(120, 20, 50, 50), Color::Green)
+        );
+        // A corner flips on both axes.
+        let flipped = resized(&item, Handle::BottomRight, Point::new(10, 5), 200, 100);
+        assert_eq!(flipped.bounds(), Rect::new(10, 5, 30, 15));
+        // Through the editor: the normalized box is what is stored.
+        let mut e = selected_box();
+        e.on_down(Point::new(40, 45)); // left edge
+        e.on_up(Point::new(180, 45));
+        assert_eq!(e.items()[0], Item::BlackBox(Rect::new(120, 20, 60, 50)));
+    }
+
+    #[test]
+    fn a_resized_box_keeps_the_minimum_size() {
+        let item = Item::Pixelate(Rect::new(40, 20, 80, 50));
+        let at = |h: Handle, x: i32, y: i32| resized(&item, h, Point::new(x, y), 200, 100);
+        // Right edge dragged onto (or just short of, or just past) the left edge: it waits
+        // MIN_SIZE away on its own side...
+        for x in [40 - MIN_SIZE + 1, 38, 40, 43, 40 + MIN_SIZE - 1] {
+            assert_eq!(
+                at(Handle::Right, x, 0).bounds(),
+                Rect::new(40, 20, MIN_SIZE, 50),
+                "x = {x}"
+            );
+        }
+        // ...and flips once the pointer is MIN_SIZE past it.
+        assert_eq!(
+            at(Handle::Right, 40 - MIN_SIZE, 0).bounds(),
+            Rect::new(40 - MIN_SIZE, 20, MIN_SIZE, 50)
+        );
+        assert_eq!(
+            at(Handle::Right, 40 + MIN_SIZE, 0).bounds(),
+            Rect::new(40, 20, MIN_SIZE, 50)
+        );
+        // Both axes of a corner.
+        assert_eq!(
+            at(Handle::TopLeft, 119, 69).bounds(),
+            Rect::new(120 - MIN_SIZE, 70 - MIN_SIZE, MIN_SIZE, MIN_SIZE)
+        );
+        // Every handle, wherever it is dragged: never too small, never outside the image.
+        for h in Handle::BOX {
+            for (x, y) in [
+                (-50, -50),
+                (0, 0),
+                (40, 20),
+                (80, 45),
+                (120, 70),
+                (199, 99),
+                (900, 900),
+            ] {
+                let b = at(h, x, y).bounds();
+                assert!(b.width >= MIN_SIZE && b.height >= MIN_SIZE, "{h:?} {b:?}");
+                assert!(
+                    b.left() >= 0 && b.top() >= 0 && b.right() <= 199 && b.bottom() <= 99,
+                    "{h:?} to ({x},{y}): {b:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn resizing_is_clamped_to_the_image_without_drifting() {
+        let mut e = selected_box();
+        e.on_down(Point::new(120, 70));
+        e.on_move(Point::new(5000, 5000));
+        assert_eq!(e.items()[0], Item::BlackBox(Rect::new(40, 20, 159, 79)));
+        // Coming back from far outside tracks the pointer again at once.
+        e.on_move(Point::new(130, 80));
+        assert_eq!(e.items()[0], Item::BlackBox(Rect::new(40, 20, 90, 60)));
+        e.on_up(Point::new(-400, -400)); // far past the fixed corner: flipped to the origin
+        assert_eq!(e.items()[0], Item::BlackBox(Rect::new(0, 0, 40, 20)));
+    }
+
+    #[test]
+    fn a_click_on_a_handle_changes_nothing_and_records_nothing() {
+        let mut e = selected_box();
+        e.set_hit_slop(4);
+        // Grabbed 3 px off the corner: the corner must not jump to the pointer.
+        click(&mut e, 123, 67);
+        assert_eq!(e.items()[0], Item::BlackBox(Rect::new(40, 20, 80, 50)));
+        e.undo(); // takes back the box itself: the click was not a step
+        assert!(e.items().is_empty());
+        // The grab offset is kept during the drag: 10 px of travel is 10 px of resize.
+        let mut e = selected_box();
+        e.set_hit_slop(4);
+        e.on_down(Point::new(123, 67));
+        e.on_up(Point::new(133, 77));
+        assert_eq!(e.items()[0], Item::BlackBox(Rect::new(40, 20, 90, 60)));
+    }
+
+    #[test]
+    fn a_handle_only_resizes_the_item_that_is_already_selected() {
+        // Rectangle (10,10)-(60,40) and black box (100,10)-(140,40); nothing selected.
+        let mut e = with_two_items();
+        e.on_down(Point::new(100, 10)); // the box's corner, but it is not selected: a move
+        e.on_up(Point::new(110, 20));
+        assert_eq!(e.items()[1], Item::BlackBox(Rect::new(110, 20, 40, 30)));
+        // Now it is selected: the same corner resizes.
+        e.on_down(Point::new(110, 20));
+        e.on_up(Point::new(120, 25));
+        assert_eq!(e.items()[1], Item::BlackBox(Rect::new(120, 25, 30, 25)));
+        // A handle of the selected item wins over another item under the pointer.
+        let mut e = with_two_items();
+        click(&mut e, 120, 25);
+        e.on_down(Point::new(100, 25)); // the box's left edge handle
+        e.on_up(Point::new(58, 25)); // dragged onto the rectangle's right edge
+        assert_eq!(e.items()[1], Item::BlackBox(Rect::new(58, 10, 82, 30)));
+        assert_eq!(e.selected(), Some(&e.items()[1]));
+        e.on_down(Point::new(58, 25)); // both are here; the handle is grabbed
+        e.on_up(Point::new(70, 25));
+        assert_eq!(e.items()[1], Item::BlackBox(Rect::new(70, 10, 70, 30)));
+        assert_eq!(
+            e.items()[0],
+            Item::Rect(Rect::new(10, 10, 50, 30), Style::DEFAULT)
+        );
+    }
+
+    #[test]
+    fn escape_and_undo_cancel_a_resize_in_progress() {
+        let mut e = selected_box();
+        e.on_down(Point::new(120, 70));
+        e.on_move(Point::new(150, 90));
+        assert_eq!(e.on_escape(), EscapeResult::Cancelled);
+        assert_eq!(e.items()[0], Item::BlackBox(Rect::new(40, 20, 80, 50)));
+        assert!(!e.is_dragging());
+        e.on_down(Point::new(120, 70));
+        e.on_move(Point::new(150, 90));
+        assert!(!e.undo(), "cancels the resize only");
+        assert_eq!(e.items()[0], Item::BlackBox(Rect::new(40, 20, 80, 50)));
+        assert!(!e.can_redo());
+    }
+
+    #[test]
+    fn a_text_box_keeps_its_text_and_style_when_resized() {
+        let blue = Style {
+            color: Color::Blue,
+            thickness: Thickness::Thick,
+        };
+        let item = Item::Text {
+            rect: Rect::new(10, 10, 100, 40),
+            text: "note".into(),
+            style: blue,
+        };
+        assert_eq!(
+            resized(&item, Handle::BottomRight, Point::new(150, 80), 200, 100),
+            Item::Text {
+                rect: Rect::new(10, 10, 140, 70),
+                text: "note".into(),
+                style: blue,
+            }
+        );
+    }
+
+    #[test]
+    fn an_arrow_is_resized_by_its_ends_and_keeps_its_direction() {
+        let mut e = selected_item(Tool::Arrow, (20, 50), (120, 50), (70, 50));
+        e.on_down(Point::new(120, 50)); // the point
+        e.on_move(Point::new(150, 80));
+        e.on_up(Point::new(160, 90));
+        let moved = Item::Arrow {
+            from: Point::new(20, 50),
+            to: Point::new(160, 90),
+            style: Style::DEFAULT,
+        };
+        assert_eq!(e.items()[0], moved);
+        e.on_down(Point::new(20, 50)); // the tail, dragged past the point: no swap of ends
+        e.on_up(Point::new(190, 95));
+        assert_eq!(
+            e.items()[0],
+            Item::Arrow {
+                from: Point::new(190, 95),
+                to: Point::new(160, 90),
+                style: Style::DEFAULT,
+            }
+        );
+        assert!(e.undo());
+        assert_eq!(e.items()[0], moved, "one step per resize");
+        // Clamped to the image. (Undo cleared the selection: pick the arrow again first.)
+        click(&mut e, 90, 70);
+        e.on_down(Point::new(160, 90));
+        e.on_up(Point::new(900, -900));
+        assert_eq!(e.items()[0].bounds(), Rect::new(20, 0, 179, 50));
+    }
+
+    #[test]
+    fn an_arrow_end_stays_min_size_from_the_other_end() {
+        let arrow = Item::Arrow {
+            from: Point::new(50, 50),
+            to: Point::new(120, 50),
+            style: Style::DEFAULT,
+        };
+        let end_at = |x: i32, y: i32| match resized(&arrow, Handle::End, Point::new(x, y), 200, 100)
+        {
+            Item::Arrow { from, to, .. } => {
+                assert_eq!(from, Point::new(50, 50), "the tail never moves");
+                to
+            }
+            other => panic!("not an arrow: {other:?}"),
+        };
+        assert_eq!(end_at(50 + MIN_SIZE, 50), Point::new(50 + MIN_SIZE, 50));
+        // Too near: pushed out to MIN_SIZE in the pointer's direction.
+        assert_eq!(end_at(52, 50), Point::new(50 + MIN_SIZE, 50));
+        assert_eq!(end_at(50, 47), Point::new(50, 50 - MIN_SIZE));
+        let diagonal = end_at(48, 48);
+        assert!(
+            arrow_long_enough(Point::new(50, 50), diagonal),
+            "{diagonal:?}"
+        );
+        assert!(diagonal.x < 50 && diagonal.y < 50, "towards the pointer");
+        // Exactly on the tail there is no direction: the point stays where it was.
+        assert_eq!(end_at(50, 50), Point::new(120, 50));
+        // In a corner of the image there may be no room in the pointer's direction either.
+        let corner = Item::Arrow {
+            from: Point::new(2, 2),
+            to: Point::new(40, 40),
+            style: Style::DEFAULT,
+        };
+        assert_eq!(
+            resized(&corner, Handle::End, Point::new(0, 0), 200, 100),
+            corner
+        );
+        // The tail handle follows the same rule.
+        let Item::Arrow { from, to, .. } =
+            resized(&arrow, Handle::Start, Point::new(118, 50), 200, 100)
+        else {
+            panic!("not an arrow");
+        };
+        assert_eq!(
+            (from, to),
+            (Point::new(120 - MIN_SIZE, 50), Point::new(120, 50))
+        );
+    }
+
+    #[test]
+    fn a_step_marker_cannot_be_resized() {
+        let marker = step(50, 50, 3);
+        for h in Handle::BOX.into_iter().chain([Handle::Start, Handle::End]) {
+            assert_eq!(resized(&marker, h, Point::new(90, 90), 200, 100), marker);
+        }
+        // A box ignores a line's handles and the other way round.
+        let r = Item::Rect(Rect::new(10, 10, 50, 40), Style::DEFAULT);
+        assert_eq!(resized(&r, Handle::End, Point::new(90, 90), 200, 100), r);
+        let arrow = Item::Arrow {
+            from: Point::new(20, 30),
+            to: Point::new(90, 60),
+            style: Style::DEFAULT,
+        };
+        assert_eq!(
+            resized(&arrow, Handle::TopLeft, Point::new(0, 0), 200, 100),
+            arrow
+        );
+    }
+
+    #[test]
+    fn the_cursor_over_a_handle_shows_the_direction_it_resizes_in() {
+        let e = selected_box();
+        let cursor = |x: i32, y: i32| e.resize_cursor(Point::new(x, y));
+        assert_eq!(cursor(40, 20), Some(ResizeCursor::NwSe));
+        assert_eq!(cursor(120, 70), Some(ResizeCursor::NwSe));
+        assert_eq!(cursor(120, 20), Some(ResizeCursor::NeSw));
+        assert_eq!(cursor(40, 70), Some(ResizeCursor::NeSw));
+        assert_eq!(cursor(40, 45), Some(ResizeCursor::WestEast));
+        assert_eq!(cursor(120, 45), Some(ResizeCursor::WestEast));
+        assert_eq!(cursor(80, 20), Some(ResizeCursor::NorthSouth));
+        assert_eq!(cursor(80, 70), Some(ResizeCursor::NorthSouth));
+        assert_eq!(
+            cursor(80, 45),
+            None,
+            "elsewhere on the item: the move cursor"
+        );
+        // The ends of an arrow: along the arrow.
+        for (to, want) in [
+            ((120, 52), ResizeCursor::WestEast),
+            ((22, 95), ResizeCursor::NorthSouth),
+            ((80, 95), ResizeCursor::NwSe),
+            ((80, 5), ResizeCursor::NeSw),
+        ] {
+            let mid = ((20 + to.0) / 2, (50 + to.1) / 2);
+            let e = selected_item(Tool::Arrow, (20, 50), to, mid);
+            assert_eq!(
+                e.resize_cursor(Point::new(to.0, to.1)),
+                Some(want),
+                "{to:?}"
+            );
+            assert_eq!(
+                e.resize_cursor(Point::new(20, 50)),
+                Some(want),
+                "tail, {to:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn tool_order_matches_the_style_slots() {
+        for (i, tool) in Tool::ALL.into_iter().enumerate() {
+            assert_eq!(tool.index(), i, "{tool:?}");
+        }
+    }
+
+    #[test]
+    fn ellipse_and_line_keys_and_defaults() {
+        assert_eq!(shortcut('e'), Some(Shortcut::Tool(Tool::Ellipse)));
+        assert_eq!(shortcut('E'), Some(Shortcut::Tool(Tool::Ellipse)));
+        assert_eq!(shortcut('l'), Some(Shortcut::Tool(Tool::Line)));
+        assert_eq!(shortcut('L'), Some(Shortcut::Tool(Tool::Line)));
+        for tool in [Tool::Ellipse, Tool::Line] {
+            assert_eq!(
+                tool.default_style(),
+                Style::DEFAULT,
+                "{tool:?}: red, medium"
+            );
+            assert!(tool.uses_color() && tool.uses_thickness(), "{tool:?}");
+            let mut e = Editor::new(200, 100);
+            e.set_tool(tool);
+            assert_eq!(e.style(), Style::DEFAULT);
+            assert!(e.color_enabled() && e.thickness_enabled());
+        }
+        // Every tool key is its own.
+        let keys = ['s', 'c', 'r', 'e', 't', 'a', 'l', 'h', 'p', 'b', 'f', 'n'];
+        let mut tools: Vec<Tool> = Vec::new();
+        for k in keys {
+            let Some(Shortcut::Tool(t)) = shortcut(k) else {
+                panic!("{k:?} is not a tool key");
+            };
+            assert!(!tools.contains(&t), "{k:?} repeats {t:?}");
+            tools.push(t);
+        }
+        assert_eq!(tools.len(), Tool::ALL.len(), "one key per tool");
+    }
+
+    #[test]
+    fn ellipse_tool_commits_a_normalized_clamped_box_with_the_min_size_rule() {
+        let mut e = Editor::new(200, 100);
+        e.set_tool(Tool::Ellipse);
+        drag(&mut e, (10, 10), (10 + MIN_SIZE - 1, 80)); // too narrow
+        assert!(e.items().is_empty());
+        drag(&mut e, (150, 90), (-20, 30)); // up-left, past the edge
+        assert_eq!(
+            e.items(),
+            &[Item::Ellipse(Rect::new(0, 30, 150, 60), Style::DEFAULT)]
+        );
+        assert!(!e.items()[0].is_pixel(), "a vector item, drawn on top");
+        assert!(e.undo());
+        assert!(e.items().is_empty());
+        assert!(e.redo());
+        assert_eq!(e.items().len(), 1);
+    }
+
+    #[test]
+    fn line_tool_keeps_its_ends_and_follows_the_length_rule() {
+        let mut e = Editor::new(200, 100);
+        e.set_tool(Tool::Line);
+        drag(&mut e, (50, 50), (52, 53)); // a click
+        assert!(e.items().is_empty());
+        drag(&mut e, (150, 80), (40, 80)); // level, right to left: no height, still a line
+        assert_eq!(
+            e.items(),
+            &[Item::Line {
+                from: Point::new(150, 80),
+                to: Point::new(40, 80),
+                style: Style::DEFAULT,
+            }]
+        );
+        drag(&mut e, (10, 10), (500, -40)); // clamped to the image
+        assert_eq!(
+            e.items()[1],
+            Item::Line {
+                from: Point::new(10, 10),
+                to: Point::new(199, 0),
+                style: Style::DEFAULT,
+            }
+        );
+        assert!(e.undo());
+        assert_eq!(e.items().len(), 1);
+        e.on_down(Point::new(10, 10));
+        e.on_move(Point::new(90, 90));
+        assert!(!e.undo(), "cancels the line being drawn");
+        assert_eq!(e.items().len(), 1);
+    }
+
+    #[test]
+    fn ellipse_and_line_are_previewed_while_dragging() {
+        let green_thin = Style {
+            color: Color::Green,
+            thickness: Thickness::Thin,
+        };
+        let mut e = Editor::new(200, 100);
+        e.set_tool(Tool::Ellipse);
+        e.set_color(Color::Green);
+        e.set_thickness(Thickness::Thin);
+        e.on_down(Point::new(60, 50));
+        e.on_move(Point::new(20, 10));
+        assert_eq!(
+            e.preview(),
+            Some(Item::Ellipse(Rect::new(20, 10, 40, 40), green_thin))
+        );
+        e.on_up(Point::new(20, 10));
+        assert_eq!(e.preview(), None);
+        assert_eq!(
+            e.items(),
+            &[Item::Ellipse(Rect::new(20, 10, 40, 40), green_thin)]
+        );
+
+        e.set_tool(Tool::Line);
+        assert_eq!(e.style(), Style::DEFAULT, "the line tool has its own style");
+        e.on_down(Point::new(60, 50));
+        e.on_move(Point::new(20, 10));
+        assert_eq!(
+            e.preview(),
+            Some(Item::Line {
+                from: Point::new(60, 50),
+                to: Point::new(20, 10),
+                style: Style::DEFAULT,
+            })
+        );
+        e.on_escape();
+        e.set_tool(Tool::Ellipse);
+        assert_eq!(
+            e.style(),
+            green_thin,
+            "and the ellipse tool remembers its own"
+        );
+    }
+
+    #[test]
+    fn an_ellipse_is_picked_near_its_outline_only() {
+        // 100 × 60, centred on (100, 50): the outline passes through (50,50) and (100,20).
+        let ellipse = Item::Ellipse(Rect::new(50, 20, 100, 60), Style::DEFAULT);
+        let hit = |x: i32, y: i32| ellipse.hit(Point::new(x, y), 3);
+        assert!(hit(50, 50), "leftmost point");
+        assert!(hit(100, 20), "top");
+        assert!(hit(149, 50) && hit(100, 79));
+        assert!(hit(52, 50), "on the 3-px line");
+        assert!(hit(47, 50), "3 px outside: within the slack");
+        assert!(!hit(44, 50), "6 px outside");
+        assert!(!hit(100, 50), "the middle is hollow");
+        assert!(!hit(70, 50), "well inside");
+        assert!(!hit(52, 22), "the corner of its box is outside the ellipse");
+        // What is inside stays clickable.
+        let mut e = Editor::new(200, 100);
+        e.set_tool(Tool::BlackBox);
+        drag(&mut e, (90, 40), (110, 60));
+        e.set_tool(Tool::Ellipse);
+        drag(&mut e, (50, 20), (150, 80));
+        e.set_tool(Tool::Select);
+        assert_eq!(e.hit_test(Point::new(100, 50)), Some(0), "the box inside");
+        assert_eq!(
+            e.hit_test(Point::new(50, 50)),
+            Some(1),
+            "the ellipse itself"
+        );
+        // A small ellipse has no hollow middle left to miss.
+        let dot = Item::Ellipse(Rect::new(10, 10, 8, 8), Style::DEFAULT);
+        assert!(dot.hit(Point::new(14, 14), 3));
+    }
+
+    #[test]
+    fn a_line_is_picked_near_the_segment_only() {
+        let line = Item::Line {
+            from: Point::new(20, 50),
+            to: Point::new(120, 50),
+            style: Style::DEFAULT,
+        };
+        let hit = |x: i32, y: i32| line.hit(Point::new(x, y), 2);
+        assert!(hit(60, 50) && hit(60, 53), "on and beside it");
+        assert!(!hit(60, 56));
+        assert!(hit(122, 50), "just past the end");
+        assert!(!hit(126, 50));
+        // No head: where an arrow's barb would be picked, a line is not.
+        assert!(!hit(110, 56));
+    }
+
+    #[test]
+    fn ellipse_and_line_move_restyle_and_delete_like_the_other_shapes() {
+        let mut e = selected_item(Tool::Ellipse, (20, 20), (80, 60), (29, 26));
+        e.on_down(Point::new(29, 26)); // on the outline, clear of the handles
+        e.on_up(Point::new(500, 500)); // moved, stopping at the image edge
+        assert_eq!(
+            e.items()[0],
+            Item::Ellipse(Rect::new(139, 59, 60, 40), Style::DEFAULT)
+        );
+        assert!(e.color_enabled() && e.thickness_enabled());
+        e.set_color(Color::Blue);
+        e.set_thickness(Thickness::Thick);
+        let blue_thick = Style {
+            color: Color::Blue,
+            thickness: Thickness::Thick,
+        };
+        assert_eq!(
+            e.items()[0],
+            Item::Ellipse(Rect::new(139, 59, 60, 40), blue_thick)
+        );
+        assert_eq!(e.style(), blue_thick, "the toolbar shows the item's style");
+        assert!(e.delete_selected());
+        assert!(e.items().is_empty());
+        assert!(e.undo() && e.undo() && e.undo() && e.undo());
+        assert_eq!(
+            e.items(),
+            &[Item::Ellipse(Rect::new(20, 20, 60, 40), Style::DEFAULT)],
+            "delete, two restyles, the move: one step each"
+        );
+
+        let mut e = selected_item(Tool::Line, (20, 20), (80, 60), (50, 40));
+        e.on_down(Point::new(50, 40));
+        e.on_up(Point::new(60, 30));
+        let moved = Item::Line {
+            from: Point::new(30, 10),
+            to: Point::new(90, 50),
+            style: Style::DEFAULT,
+        };
+        assert_eq!(e.items()[0], moved);
+        assert_eq!(moved.bounds(), Rect::new(30, 10, 60, 40));
+        e.set_color(Color::Yellow);
+        assert_eq!(e.items()[0].style().map(|s| s.color), Some(Color::Yellow));
+        assert!(e.delete_selected());
+        assert!(e.undo());
+        assert_eq!(e.items().len(), 1);
+    }
+
+    #[test]
+    fn ellipse_and_line_are_resized_by_their_handles() {
+        let ellipse = Item::Ellipse(Rect::new(40, 20, 80, 50), Style::DEFAULT);
+        assert_eq!(ellipse.handles().len(), 8);
+        assert_eq!(
+            resized(&ellipse, Handle::BottomRight, Point::new(150, 90), 200, 100),
+            Item::Ellipse(Rect::new(40, 20, 110, 70), Style::DEFAULT)
+        );
+        assert_eq!(
+            resized(&ellipse, Handle::Left, Point::new(170, 0), 200, 100).bounds(),
+            Rect::new(120, 20, 50, 50),
+            "flips"
+        );
+        assert_eq!(
+            resized(&ellipse, Handle::Top, Point::new(0, 68), 200, 100).bounds(),
+            Rect::new(40, 70 - MIN_SIZE, 80, MIN_SIZE)
+        );
+
+        let mut e = selected_item(Tool::Line, (20, 50), (120, 50), (70, 50));
+        assert_eq!(
+            e.handles(),
+            vec![
+                (Handle::Start, Point::new(20, 50)),
+                (Handle::End, Point::new(120, 50)),
+            ]
+        );
+        assert_eq!(
+            e.resize_cursor(Point::new(120, 50)),
+            Some(ResizeCursor::WestEast)
+        );
+        e.on_down(Point::new(120, 50));
+        e.on_up(Point::new(22, 50)); // too near the other end: MIN_SIZE is kept
+        assert_eq!(
+            e.items()[0],
+            Item::Line {
+                from: Point::new(20, 50),
+                to: Point::new(20 + MIN_SIZE, 50),
+                style: Style::DEFAULT,
+            }
+        );
+        assert!(e.undo());
+        assert_eq!(
+            e.items()[0].bounds(),
+            Rect::new(20, 50, 100, 0),
+            "one undo step"
+        );
+    }
+
+    #[test]
+    fn ellipse_and_line_leave_the_pixels_alone() {
+        let src = detailed(40, 30);
+        let items = [
+            Item::Ellipse(Rect::new(2, 2, 30, 20), Style::DEFAULT),
+            Item::Line {
+                from: Point::new(0, 0),
+                to: Point::new(39, 29),
+                style: Style::DEFAULT,
+            },
+        ];
+        assert_eq!(apply_pixel_layer(&src, &items), src);
+    }
+
+    /// A flat mid-grey image and the value its pixels have once darkened by a spotlight.
+    fn flat_grey(w: u32, h: u32) -> (Rgba, [u8; 4]) {
+        let img = Rgba::from_raw(w, h, [200, 200, 200, 255].repeat((w * h) as usize)).unwrap();
+        let a = u32::from(SPOTLIGHT_ALPHA);
+        let dim = ((200 * (255 - a) + 127) / 255) as u8;
+        (img, [dim, dim, dim, 255])
+    }
+
+    #[test]
+    fn spotlight_tool_key_and_style() {
+        assert_eq!(shortcut('f'), Some(Shortcut::Tool(Tool::Spotlight)));
+        assert_eq!(shortcut('F'), Some(Shortcut::Tool(Tool::Spotlight)));
+        assert_eq!(
+            shortcut('s'),
+            Some(Shortcut::Tool(Tool::Select)),
+            "S stays Select"
+        );
+        let mut e = Editor::new(200, 100);
+        assert!(e.apply_shortcut(Shortcut::Tool(Tool::Spotlight)));
+        assert_eq!(e.tool(), Tool::Spotlight);
+        assert!(!e.color_enabled(), "no colour: the swatches are greyed");
+        assert!(!e.thickness_enabled(), "no line");
+        assert!(Item::Spotlight(Rect::new(0, 0, 9, 9)).is_pixel());
+        assert_eq!(Item::Spotlight(Rect::new(0, 0, 9, 9)).style(), None);
+    }
+
+    #[test]
+    fn spotlight_tool_commits_a_normalized_clamped_box_with_the_min_size_rule() {
+        let mut e = Editor::new(200, 100);
+        e.set_tool(Tool::Spotlight);
+        drag(&mut e, (10, 10), (80, 10 + MIN_SIZE - 1)); // too flat
+        assert!(e.items().is_empty());
+        e.on_down(Point::new(150, 90));
+        e.on_move(Point::new(60, 40));
+        assert_eq!(
+            e.preview(),
+            Some(Item::Spotlight(Rect::new(60, 40, 90, 50)))
+        );
+        e.on_up(Point::new(-20, 30));
+        assert_eq!(e.items(), &[Item::Spotlight(Rect::new(0, 30, 150, 60))]);
+        assert!(e.undo());
+        assert!(e.items().is_empty());
+        assert!(e.redo());
+        assert_eq!(e.items().len(), 1);
+    }
+
+    #[test]
+    fn spotlight_darkens_everything_outside_its_box_and_nothing_inside() {
+        let (src, dim) = flat_grey(60, 40);
+        let kept = [200, 200, 200, 255];
+        let out = apply_pixel_layer(&src, &[Item::Spotlight(Rect::new(10, 10, 20, 15))]);
+        for y in 0..40 {
+            for x in 0..60 {
+                // Both corner pixels belong to the box, like a crop.
+                let inside = (10..=30).contains(&x) && (10..=25).contains(&y);
+                let want = if inside { kept } else { dim };
+                assert_eq!(out.get_pixel(x, y).0, want, "({x},{y})");
+            }
+        }
+        // Dragged from corner to corner of the image, nothing is darkened at all.
+        let mut e = Editor::new(60, 40);
+        e.set_tool(Tool::Spotlight);
+        drag(&mut e, (0, 0), (59, 39));
+        assert_eq!(apply_pixel_layer(&src, e.items()), src);
+        // Translucent: the detail outside is still there.
+        let detail = apply_pixel_layer(
+            &detailed(60, 40),
+            &[Item::Spotlight(Rect::new(10, 10, 20, 15))],
+        );
+        assert_ne!(detail.get_pixel(40, 30), detail.get_pixel(41, 30));
+    }
+
+    #[test]
+    fn several_spotlights_darken_once_outside_their_union() {
+        let (src, dim) = flat_grey(80, 50);
+        let kept = [200, 200, 200, 255];
+        let (a, b) = (Rect::new(5, 5, 30, 20), Rect::new(25, 15, 40, 25)); // overlapping
+        let both = apply_pixel_layer(&src, &[Item::Spotlight(a), Item::Spotlight(b)]);
+        assert_eq!(both.get_pixel(8, 8).0, kept, "in the first only");
+        assert_eq!(both.get_pixel(60, 35).0, kept, "in the second only");
+        assert_eq!(both.get_pixel(30, 20).0, kept, "in both");
+        assert_eq!(both.get_pixel(75, 5).0, dim, "outside both: darkened once");
+        assert_eq!(both.get_pixel(8, 35).0, dim);
+        assert!(
+            both.pixels().all(|p| p.0 == kept || p.0 == dim),
+            "no pixel is darkened twice"
+        );
+        // A third one, apart from the others, still does not deepen the background.
+        let three = apply_pixel_layer(
+            &src,
+            &[
+                Item::Spotlight(a),
+                Item::Spotlight(b),
+                Item::Spotlight(Rect::new(70, 40, 8, 8)),
+            ],
+        );
+        assert_eq!(three.get_pixel(75, 5).0, dim);
+        assert_eq!(three.get_pixel(74, 44).0, kept);
+        // The order they were drawn in does not matter.
+        assert_eq!(
+            apply_pixel_layer(&src, &[Item::Spotlight(b), Item::Spotlight(a)]),
+            both
+        );
+    }
+
+    #[test]
+    fn spotlights_dim_the_other_pixel_items_outside_them_whatever_the_order() {
+        let (src, dim) = flat_grey(80, 50);
+        let spot = Item::Spotlight(Rect::new(40, 5, 30, 40));
+        let highlight = Item::Highlight(Rect::new(5, 5, 20, 20), Color::Yellow);
+        let inside_box = Item::BlackBox(Rect::new(50, 10, 10, 10));
+        let first = apply_pixel_layer(&src, &[spot.clone(), highlight.clone(), inside_box.clone()]);
+        let last = apply_pixel_layer(&src, &[highlight.clone(), inside_box.clone(), spot.clone()]);
+        assert_eq!(first, last, "the darkening always comes last");
+        // The highlight outside the spotlight is dimmed with the background (not left bright)...
+        let lit = apply_pixel_layer(&src, &[highlight]);
+        assert_ne!(first.get_pixel(10, 10), lit.get_pixel(10, 10));
+        assert_ne!(
+            first.get_pixel(10, 10).0,
+            dim,
+            "but it is still a highlight"
+        );
+        // ...and what is inside the spotlight is exactly as without it.
+        assert_eq!(first.get_pixel(55, 15).0, [0, 0, 0, 255]);
+        assert_eq!(first.get_pixel(45, 30).0, [200, 200, 200, 255]);
+        // Vector items never take part.
+        let with_vectors = apply_pixel_layer(
+            &src,
+            &[
+                Item::Rect(Rect::new(1, 1, 30, 30), Style::DEFAULT),
+                spot.clone(),
+            ],
+        );
+        assert_eq!(with_vectors, apply_pixel_layer(&src, &[spot]));
+    }
+
+    #[test]
+    fn a_spotlight_is_picked_by_its_edge_so_what_it_frames_stays_clickable() {
+        let mut e = Editor::new(200, 100);
+        e.set_tool(Tool::BlackBox);
+        drag(&mut e, (60, 30), (90, 60)); // index 0
+        e.set_tool(Tool::Spotlight);
+        drag(&mut e, (40, 20), (160, 80)); // index 1, drawn later, around the box
+        e.set_tool(Tool::Select);
+        e.set_hit_slop(3);
+        assert_eq!(e.hit_test(Point::new(75, 45)), Some(0), "the box inside it");
+        assert_eq!(
+            e.hit_test(Point::new(120, 50)),
+            None,
+            "its untouched inside"
+        );
+        assert_eq!(e.hit_test(Point::new(40, 50)), Some(1), "its left edge");
+        assert_eq!(
+            e.hit_test(Point::new(100, 82)),
+            Some(1),
+            "just below the bottom edge"
+        );
+        assert_eq!(e.hit_test(Point::new(100, 86)), None);
+        // Selected: no colour, no line; Delete removes it.
+        click(&mut e, 40, 50);
+        assert!(!e.color_enabled() && !e.thickness_enabled());
+        e.set_color(Color::Blue);
+        assert_eq!(e.items()[1], Item::Spotlight(Rect::new(40, 20, 120, 60)));
+        assert!(e.delete_selected());
+        assert_eq!(e.items(), &[Item::BlackBox(Rect::new(60, 30, 30, 30))]);
+        assert!(e.undo());
+        assert_eq!(e.items().len(), 2);
+    }
+
+    #[test]
+    fn a_spotlight_moves_and_resizes_like_a_box() {
+        let mut e = selected_item(Tool::Spotlight, (40, 20), (120, 70), (80, 20));
+        assert_eq!(e.handles().len(), 8);
+        e.on_down(Point::new(100, 20)); // the top edge, between the handles: a move
+        e.on_up(Point::new(110, 500));
+        assert_eq!(e.items()[0], Item::Spotlight(Rect::new(50, 49, 80, 50)));
+        e.on_down(Point::new(130, 99)); // bottom-right handle
+        e.on_up(Point::new(150, 80));
+        assert_eq!(e.items()[0], Item::Spotlight(Rect::new(50, 49, 100, 31)));
+        e.on_down(Point::new(50, 49)); // top-left handle, dragged past the opposite corner
+        e.on_up(Point::new(190, 95));
+        assert_eq!(e.items()[0], Item::Spotlight(Rect::new(150, 80, 40, 15)));
+        assert!(e.undo() && e.undo() && e.undo());
+        assert_eq!(e.items()[0], Item::Spotlight(Rect::new(40, 20, 80, 50)));
+    }
+
+    #[test]
+    fn the_canvas_leaves_out_what_is_being_dragged() {
+        let mut e = Editor::new(200, 100);
+        e.set_tool(Tool::Highlight);
+        drag(&mut e, (10, 10), (50, 40));
+        e.set_tool(Tool::BlackBox);
+        drag(&mut e, (100, 10), (140, 40));
+        e.set_tool(Tool::Rect);
+        drag(&mut e, (150, 50), (190, 90));
+        let highlight = Item::Highlight(Rect::new(10, 10, 40, 30), Color::Yellow);
+        let black = Item::BlackBox(Rect::new(100, 10, 40, 30));
+        // Idle: every pixel item, no vector item.
+        assert_eq!(e.canvas_pixels(), vec![highlight.clone(), black.clone()]);
+        assert_eq!(e.live_spotlights(), None);
+        // Moving or resizing a pixel item: that one is drawn as a preview instead.
+        e.set_tool(Tool::Select);
+        e.on_down(Point::new(120, 25));
+        assert_eq!(e.canvas_pixels(), vec![highlight.clone()]);
+        e.on_move(Point::new(125, 30));
+        assert_eq!(e.canvas_pixels(), vec![highlight.clone()]);
+        e.on_up(Point::new(120, 25));
+        assert_eq!(e.canvas_pixels(), vec![highlight.clone(), black.clone()]);
+        e.on_down(Point::new(100, 10)); // its corner handle: a resize
+        assert_eq!(e.moving_index(), Some(1));
+        assert_eq!(e.canvas_pixels(), vec![highlight.clone()]);
+        e.on_escape();
+        // Drawing a new pixel item: the committed ones stay.
+        e.set_tool(Tool::Pixelate);
+        e.on_down(Point::new(60, 60));
+        e.on_move(Point::new(90, 90));
+        assert_eq!(e.canvas_pixels(), vec![highlight, black]);
+    }
+
+    #[test]
+    fn spotlights_are_shown_live_while_one_is_drawn_or_dragged() {
+        let mut e = Editor::new(200, 100);
+        e.set_tool(Tool::Highlight);
+        drag(&mut e, (10, 60), (50, 90));
+        e.set_tool(Tool::Spotlight);
+        drag(&mut e, (10, 10), (60, 40));
+        let highlight = Item::Highlight(Rect::new(10, 60, 40, 30), Color::Yellow);
+        let first = Item::Spotlight(Rect::new(10, 10, 50, 30));
+        assert_eq!(e.canvas_pixels(), vec![highlight.clone(), first.clone()]);
+        assert_eq!(e.live_spotlights(), None, "idle: baked into the canvas");
+
+        // Drawing a second one: all spotlights leave the canvas and are darkened live as a
+        // union with the box being dragged (both corner pixels kept, like the export).
+        e.on_down(Point::new(100, 20));
+        e.on_move(Point::new(150, 70));
+        assert_eq!(e.canvas_pixels(), vec![highlight.clone()]);
+        assert_eq!(
+            e.live_spotlights(),
+            Some(vec![Rect::new(10, 10, 51, 31), Rect::new(100, 20, 51, 51)])
+        );
+        e.on_up(Point::new(150, 70));
+        let second = Item::Spotlight(Rect::new(100, 20, 50, 50));
+        assert_eq!(e.live_spotlights(), None);
+        assert_eq!(
+            e.canvas_pixels(),
+            vec![highlight.clone(), first.clone(), second.clone()]
+        );
+
+        // Moving one: the same, with the moved box where it is now.
+        e.set_tool(Tool::Select);
+        e.on_down(Point::new(10, 25));
+        e.on_move(Point::new(20, 35));
+        assert_eq!(e.canvas_pixels(), vec![highlight.clone()]);
+        assert_eq!(
+            e.live_spotlights(),
+            Some(vec![Rect::new(20, 20, 51, 31), Rect::new(100, 20, 51, 51)])
+        );
+        e.on_escape();
+        assert_eq!(e.live_spotlights(), None);
+        assert_eq!(e.canvas_pixels(), vec![highlight.clone(), first, second]);
+
+        // Dragging something else leaves the spotlights baked in.
+        click(&mut e, 30, 75);
+        e.on_down(Point::new(30, 75));
+        e.on_move(Point::new(40, 75));
+        assert_eq!(e.live_spotlights(), None);
+        assert_eq!(e.canvas_pixels().len(), 2);
     }
 }

@@ -477,3 +477,85 @@ Every non-obvious choice + a one-line rationale. Newest at top within each phase
   messages back into the window procedure. "Delete file…" is permanent (no Recycle Bin, which
   would need `IFileOperation`) and says so in its question.
 
+## Save feedback, resize handles, Ellipse / Line / Spotlight
+
+- **Save answers with the flyout, not by changing the canvas.** The report was "I cropped,
+  pressed Save, nothing changed": the editor keeps the full picture with the crop only shaded,
+  because the crop is part of the document and must stay editable. Rather than close the editor
+  or swap its picture for the saved one (both lose the ability to go on), Save now shows the
+  post-capture flyout for the `_annotated` file, with the exported image — cropped and annotated
+  — as the thumbnail. It is the same answer a capture gives, and puts Open / Folder / Copy / Pin
+  next to the result. The title-bar note stays. Known and accepted: the flyout's Delete removes
+  the file the editor considers saved (closing then does not ask again), and its Annotate opens
+  the copy in a second editor.
+- **`save` returns what happened; the handler reports it last.** Creating the flyout and showing
+  a message box can both re-enter the editor's window procedure, so neither may run while the
+  window state is in use. `save` only exports, writes and sets the title, and hands back a
+  `SaveOutcome`; `report_save` (history entry, flyout, or `notify::error` with the reason) runs
+  after `sync_toolbar`, as the last thing in the handler, and takes no state. The app state is
+  borrowed twice, briefly: to read the dispatch window, and to store the new flyout. The flyout
+  it replaces is dropped outside the borrow, since dropping destroys a window. An editor running
+  without the tray app (no app state) simply shows no flyout.
+- **A resize is a move with a handle.** `Moving` gained `handle: Option<(Handle, Point)>`; all
+  the rest — recomputing from the item as it was at mouse-down, one undo step on release, Esc
+  and undo cancelling, the pixel item left out of the canvas — is the existing move path, so it
+  cannot behave differently. The handle goes to *its original place plus the pointer's travel*,
+  not to the pointer: a handle is grabbed up to 5 px off its centre, and a plain click on it must
+  not nudge the edge.
+- **Resize math is per axis and has a dead zone instead of a floor.** A box handle moves the left
+  or right edge and/or the top or bottom edge; the others stay. The result is normalized, so
+  crossing the opposite edge flips the box. Within `MIN_SIZE` of the opposite edge the moved edge
+  waits `MIN_SIZE` away *on the side it started from*: that spot is always inside the picture
+  (the item was at least that large there), so no second clamp can fight the first, and the box
+  flips only once the pointer is a full `MIN_SIZE` past. An end of an arrow or line too close to
+  the other end is pushed out to `MIN_SIZE` along the pointer's direction (rounded away, so
+  never shorter), or stays where it was if that point is outside the picture. Ends are never
+  swapped: an arrow's head stays on its end.
+- **Handles act only on the item that is already selected, and are tested before anything else.**
+  A first click on a corner of an unselected box therefore still moves it, as before (and the
+  existing move tests pass unchanged); once selected, its handles win over other items under the
+  pointer. The slack is the hit-test slack on each axis, since handles are drawn as squares.
+- **Midpoint handles disappear on short sides** (under four times the slack): on a small box they
+  would cover the whole edge and leave nowhere to grab the box to move it. Below twice the slack
+  even the corners cover everything; such a box can be enlarged first. Step markers get no
+  handles because their size is the line setting, which the toolbar already changes.
+- **The cursor over an arrow's end follows the arrow** (the nearest of the four resize cursors):
+  an end has no "corner" to name.
+- **Ellipse is hit on its outline; so is Spotlight.** Both frame something else. An ellipse uses
+  the same rule as the hollow rectangle with ellipses instead of rectangles (inside the outer,
+  outside the inner). A spotlight's inside is the untouched screenshot, so a click there should
+  reach what it frames; picking it anywhere inside would make a large spotlight swallow every
+  click on a pixel item under it.
+- **Line is its own item, not an arrow with a flag.** It shares the length rule, the hit test of
+  the shaft and the two end handles through small helpers (`Item::ends`), but an arrow item with
+  a "no head" field would have changed the shape of every existing arrow value and test.
+- **Spotlights darken once, outside their union, and last.** `imaging::dim_outside(img, keep,
+  alpha)` blends black over every pixel that is in none of the rectangles (per row: mark the
+  kept spans, darken the rest), so two spotlights can never stack into a darker background and
+  the result does not depend on the order they were drawn in. In `apply_pixel_layer` this is the
+  one exception to "in order": it runs after the other pixel items, so a highlight or redaction
+  outside the spotlights is dimmed with the background whether it was drawn before or after.
+  Applying it at the first spotlight's position was the alternative; then the same picture
+  would look different depending on drawing order, with no way to see why. Vector items are
+  drawn afterwards and stay at full brightness, which is what an arrow pointing into the
+  spotlight needs. 55 % black: darker than a highlight is light, lighter than the crop shade, so
+  the background still reads as context.
+- **A spotlight keeps both corner pixels**, like a crop: boxes in the editor are spans between
+  two clamped pixel positions, so without this a spotlight dragged into the corner of the
+  picture would leave a one-pixel dark line along two edges.
+- **Live spotlights are drawn with a clip region, because darkening cannot be painted over.**
+  For the other pixel items the canvas keeps the committed ones baked in and paints the dragged
+  one on top. A second spotlight would have to *brighten* part of an already darkened canvas.
+  So while any spotlight is drawn, moved or resized, all spotlights are left out of the canvas
+  source (`Editor::canvas_pixels`, now the one place that decides this) and the window darkens
+  the picture with a single `AlphaBlend` whose clip region excludes every kept area
+  (`Editor::live_spotlights`) — the union again, with one canvas rebuild at each end of the drag.
+- **The toolbar is two rows.** One row was 1058 px at 96 DPI; with Ellipse, Line and Spotlight it
+  would be about 1240 px, wider than a 1366-px screen at 125 % (1092 px) — the window is never
+  narrower than its toolbar. Shortening labels and buttons to fit would have needed "Rect",
+  "Hilite", "Pixel" and 22-px swatches and left no room for the next tool. The tools now have
+  the first row and colours, line widths, Undo, Redo, Save and Copy the second: 722 px wide, 74
+  px tall (34 px less canvas), every label as before. `button_x` sums along a button's row,
+  `button_y` places the row, and a compile-time assertion fails the build if the toolbar grows
+  past 1060 px. Undo / Redo / Save / Copy moved to ids 240–243 so the consecutive tool ids have
+  room.

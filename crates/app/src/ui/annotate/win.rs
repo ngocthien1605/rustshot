@@ -1,12 +1,12 @@
 //! The annotation editor window: a normal, resizable top-level window that shows a screenshot
-//! with a toolbar (Rectangle, Text, Arrow, Highlight, Pixelate; six colour swatches; three line
-//! thicknesses; Undo, Redo, Save, Copy). It runs on the main UI thread's message loop (like the
+//! under a two-row toolbar (the tools; then six colour swatches, three line thicknesses, Undo,
+//! Redo, Save, Copy). It runs on the main UI thread's message loop (like the
 //! flyout), so it needs no thread of its own.
 //!
 //! What you see is what gets saved: the canvas shows the screenshot with the pixel items
-//! (highlight, pixelate) applied by the same [`apply_pixel_layer`] the export uses, and one GDI
-//! routine ([`paint_items`]) draws the outlines, arrows and text both on screen and into the
-//! exported image.
+//! (highlight, pixelate, black box, spotlight) applied by the same [`apply_pixel_layer`] the export uses, and one GDI
+//! routine ([`paint_items`]) draws the outlines, ellipses, lines, arrows and text both on screen
+//! and into the exported image.
 
 use std::cell::RefCell;
 use std::ffi::c_void;
@@ -49,81 +49,118 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use windows::Win32::Graphics::Gdi::{
     Ellipse, ScreenToClient, DT_CENTER, DT_SINGLELINE, DT_VCENTER,
 };
+use windows::Win32::Graphics::Gdi::{ExcludeClipRect, WHITE_BRUSH};
 use windows::Win32::UI::Input::KeyboardAndMouse::VK_DELETE;
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetCursorPos, SetCursor, HTCLIENT, IDC_ARROW, IDC_SIZEALL, WM_SETCURSOR,
+    GetCursorPos, SetCursor, HTCLIENT, IDC_ARROW, IDC_SIZEALL, IDC_SIZENESW, IDC_SIZENS,
+    IDC_SIZENWSE, IDC_SIZEWE, WM_SETCURSOR,
 };
 
 use crate::platform::gdi::{ScreenDc, Surface};
 
 use super::model::{
     apply_pixel_layer, arrow_geometry, enter_action, font_px, shortcut, Color, Doc, Editor,
-    EnterAction, EscapeResult, Item, Style, Thickness, Tool, Typing, View, HIGHLIGHT_ALPHA,
+    EnterAction, EscapeResult, Item, ResizeCursor, Style, Thickness, Tool, Typing, View,
+    HIGHLIGHT_ALPHA, SPOTLIGHT_ALPHA,
 };
 
 const CLASS_NAME: PCWSTR = w!("RustShotAnnotate");
 static REGISTER: Once = Once::new();
 
+/// The toolbar has two rows of buttons: the tools, then the style and the actions. One row of
+/// everything was 1060 px wide at 96 DPI before Ellipse, Line and Spotlight were added — with
+/// them, more than a 1366-px laptop screen at 125 % can show.
+const ROWS: i32 = 2;
+/// Height of a toolbar button and the gap above each row (and below the last), at 96 DPI.
+const ROW_H: i32 = 28;
+const ROW_GAP: i32 = 6;
 /// Toolbar height and canvas margin at 96 DPI; scaled by the window's DPI (see `dpi`).
-const TOOLBAR_H: i32 = 40;
+const TOOLBAR_H: i32 = ROW_GAP + ROWS * (ROW_H + ROW_GAP);
 const MARGIN: i32 = 8;
-/// How far (screen px at 96 DPI) a click may miss an annotation and still select it.
+/// How far (screen px at 96 DPI) a click may miss an annotation, or a resize handle of the
+/// selected one, and still pick it.
 const HIT_SLOP: i32 = 5;
+/// Half the side of a resize handle's square (screen px at 96 DPI): a little inside the slack.
+const HANDLE_HALF: i32 = 4;
 /// How dark the part outside a crop is shown (about 60 % black).
 const CROP_SHADE_ALPHA: u8 = 150;
-/// Toolbar buttons: id, label, gap before the button, width, extra style — lengths at 96 DPI;
-/// each button's x is the running sum ([`button_x`]). The tool buttons are radio buttons (their
-/// ids must stay consecutive, in [`Tool::ALL`] order); the swatches and thickness buttons are
-/// owner-drawn (`WM_DRAWITEM`), their labels only name them for screen readers.
-const BUTTONS: [(i32, PCWSTR, i32, i32, u32); 22] = [
-    (ID_TOOL0, w!("Select"), 8, 50, TOOL | WS_GROUP),
-    (ID_TOOL0 + 1, w!("Crop"), 4, 44, TOOL),
-    (ID_TOOL0 + 2, w!("Rectangle"), 4, 72, TOOL),
-    (ID_TOOL0 + 3, w!("Text"), 4, 44, TOOL),
-    (ID_TOOL0 + 4, w!("Arrow"), 4, 50, TOOL),
-    (ID_TOOL0 + 5, w!("Highlight"), 4, 64, TOOL),
-    (ID_TOOL0 + 6, w!("Pixelate"), 4, 60, TOOL),
-    (ID_TOOL0 + 7, w!("Black box"), 4, 66, TOOL),
-    (ID_TOOL0 + 8, w!("Step"), 4, 44, TOOL),
-    (ID_COLOR0, w!("Red"), 12, 26, BS_OWNERDRAW),
-    (ID_COLOR0 + 1, w!("Yellow"), 2, 26, BS_OWNERDRAW),
-    (ID_COLOR0 + 2, w!("Green"), 2, 26, BS_OWNERDRAW),
-    (ID_COLOR0 + 3, w!("Blue"), 2, 26, BS_OWNERDRAW),
-    (ID_COLOR0 + 4, w!("Black"), 2, 26, BS_OWNERDRAW),
-    (ID_COLOR0 + 5, w!("White"), 2, 26, BS_OWNERDRAW),
-    (ID_WIDTH0, w!("Thin"), 12, 30, BS_OWNERDRAW),
-    (ID_WIDTH0 + 1, w!("Medium"), 2, 30, BS_OWNERDRAW),
-    (ID_WIDTH0 + 2, w!("Thick"), 2, 30, BS_OWNERDRAW),
-    (ID_UNDO, w!("Undo"), 12, 52, 0),
-    (ID_REDO, w!("Redo"), 4, 52, 0),
-    (ID_SAVE, w!("Save"), 4, 52, 0),
-    (ID_COPY, w!("Copy"), 4, 52, 0),
+/// Toolbar buttons: id, label, gap before the button, width, extra style, row — lengths at
+/// 96 DPI; each button's x is the running sum along its row ([`button_x`]). The tool buttons are
+/// radio buttons (their ids must stay consecutive, in [`Tool::ALL`] order); the swatches and
+/// thickness buttons are owner-drawn (`WM_DRAWITEM`), their labels only name them for screen
+/// readers.
+const BUTTONS: [(i32, PCWSTR, i32, i32, u32, i32); 25] = [
+    (ID_TOOL0, w!("Select"), 8, 50, TOOL | WS_GROUP, 0),
+    (ID_TOOL0 + 1, w!("Crop"), 4, 44, TOOL, 0),
+    (ID_TOOL0 + 2, w!("Rectangle"), 4, 72, TOOL, 0),
+    (ID_TOOL0 + 3, w!("Ellipse"), 4, 56, TOOL, 0),
+    (ID_TOOL0 + 4, w!("Text"), 4, 44, TOOL, 0),
+    (ID_TOOL0 + 5, w!("Arrow"), 4, 50, TOOL, 0),
+    (ID_TOOL0 + 6, w!("Line"), 4, 44, TOOL, 0),
+    (ID_TOOL0 + 7, w!("Highlight"), 4, 64, TOOL, 0),
+    (ID_TOOL0 + 8, w!("Pixelate"), 4, 60, TOOL, 0),
+    (ID_TOOL0 + 9, w!("Black box"), 4, 66, TOOL, 0),
+    (ID_TOOL0 + 10, w!("Spotlight"), 4, 68, TOOL, 0),
+    (ID_TOOL0 + 11, w!("Step"), 4, 44, TOOL, 0),
+    (ID_COLOR0, w!("Red"), 8, 26, BS_OWNERDRAW, 1),
+    (ID_COLOR0 + 1, w!("Yellow"), 2, 26, BS_OWNERDRAW, 1),
+    (ID_COLOR0 + 2, w!("Green"), 2, 26, BS_OWNERDRAW, 1),
+    (ID_COLOR0 + 3, w!("Blue"), 2, 26, BS_OWNERDRAW, 1),
+    (ID_COLOR0 + 4, w!("Black"), 2, 26, BS_OWNERDRAW, 1),
+    (ID_COLOR0 + 5, w!("White"), 2, 26, BS_OWNERDRAW, 1),
+    (ID_WIDTH0, w!("Thin"), 12, 30, BS_OWNERDRAW, 1),
+    (ID_WIDTH0 + 1, w!("Medium"), 2, 30, BS_OWNERDRAW, 1),
+    (ID_WIDTH0 + 2, w!("Thick"), 2, 30, BS_OWNERDRAW, 1),
+    (ID_UNDO, w!("Undo"), 12, 52, 0, 1),
+    (ID_REDO, w!("Redo"), 4, 52, 0, 1),
+    (ID_SAVE, w!("Save"), 4, 52, 0, 1),
+    (ID_COPY, w!("Copy"), 4, 52, 0, 1),
 ];
 
-/// Left edge of button `i` at 96 DPI: the gaps and widths of the buttons before it, plus its gap.
+/// Left edge of button `i` at 96 DPI: the gaps and widths of the buttons before it in its row,
+/// plus its gap.
 const fn button_x(i: usize) -> i32 {
     let mut x = 0;
     let mut k = 0;
     while k < i {
-        x += BUTTONS[k].2 + BUTTONS[k].3;
+        if BUTTONS[k].5 == BUTTONS[i].5 {
+            x += BUTTONS[k].2 + BUTTONS[k].3;
+        }
         k += 1;
     }
     x + BUTTONS[i].2
 }
 
-/// The narrowest client area that shows the whole toolbar, at 96 DPI.
+/// Top edge of button `i` at 96 DPI: its row.
+const fn button_y(i: usize) -> i32 {
+    ROW_GAP + BUTTONS[i].5 * (ROW_H + ROW_GAP)
+}
+
+/// The narrowest client area that shows the whole toolbar, at 96 DPI: its longest row.
 const TOOLBAR_W: i32 = {
-    let last = BUTTONS.len() - 1;
-    button_x(last) + BUTTONS[last].3 + MARGIN
+    let mut right = 0;
+    let mut i = 0;
+    while i < BUTTONS.len() {
+        let r = button_x(i) + BUTTONS[i].3;
+        if r > right {
+            right = r;
+        }
+        i += 1;
+    }
+    right + MARGIN
 };
+
+// The whole toolbar must stay within 1200 px at 96 DPI. It also has to fit a 1366-px screen at
+// 125 % (1092 px at 96 DPI, less the window frame), so the build fails well before that.
+const _: () = assert!(TOOLBAR_W <= 1060);
 
 /// First tool button; the tools follow in [`Tool::ALL`] order.
 const ID_TOOL0: i32 = 201;
 const ID_TOOL_LAST: i32 = ID_TOOL0 + Tool::ALL.len() as i32 - 1;
-const ID_UNDO: i32 = 210;
-const ID_REDO: i32 = 211;
-const ID_SAVE: i32 = 212;
-const ID_COPY: i32 = 213;
+const ID_UNDO: i32 = 240;
+const ID_REDO: i32 = 241;
+const ID_SAVE: i32 = 242;
+const ID_COPY: i32 = 243;
 /// Colour swatches, in [`Color::PALETTE`] order.
 const ID_COLOR0: i32 = 220;
 /// Thickness buttons, in [`Thickness::ALL`] order.
@@ -334,7 +371,7 @@ fn create_toolbar(parent: HWND) -> Result<()> {
     // SAFETY: standard BUTTON child creation; sizes and font are applied by `layout_toolbar`.
     unsafe {
         let hinstance = GetModuleHandleW(None).context("GetModuleHandleW")?;
-        for (id, label, _, _, extra) in BUTTONS {
+        for (id, label, _, _, extra, _) in BUTTONS {
             CreateWindowExW(
                 WINDOW_EX_STYLE(0),
                 w!("BUTTON"),
@@ -393,7 +430,7 @@ fn show_toolbar(hwnd: HWND, now: Shown) {
     // SAFETY: checks, enables and invalidates our own child buttons.
     unsafe {
         let _ = CheckRadioButton(hwnd, ID_TOOL0, ID_TOOL_LAST, tool_id);
-        for (id, _, _, _, _) in BUTTONS {
+        for (id, _, _, _, _, _) in BUTTONS {
             let enable = if color_of(id).is_some() {
                 now.colors
             } else if thickness_of(id).is_some() {
@@ -488,11 +525,18 @@ fn set_dpi(hwnd: HWND, dpi: u32) {
     let px = |v: i32| crate::platform::dpi::scale(v, dpi);
     // SAFETY: repositions and refonts our own child buttons.
     unsafe {
-        for (i, &(id, _, _, width, _)) in BUTTONS.iter().enumerate() {
+        for (i, &(id, _, _, width, _, _)) in BUTTONS.iter().enumerate() {
             let Ok(button) = GetDlgItem(Some(hwnd), id) else {
                 continue;
             };
-            let _ = MoveWindow(button, px(button_x(i)), px(6), px(width), px(28), true);
+            let _ = MoveWindow(
+                button,
+                px(button_x(i)),
+                px(button_y(i)),
+                px(width),
+                px(ROW_H),
+                true,
+            );
             if let Some(f) = font {
                 SendMessageW(
                     button,
@@ -570,8 +614,9 @@ unsafe fn wndproc_inner(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) ->
             LRESULT(0)
         }
         WM_ERASEBKGND => LRESULT(1), // we paint everything (double-buffered)
-        // Over the canvas with the Select tool: a move cursor on an annotation, else an arrow.
-        // Elsewhere (and with the drawing tools) the class cursor, the red crosshair.
+        // Over the canvas with the Select tool: a resize cursor on a handle of the selected
+        // annotation, a move cursor on an annotation, else an arrow. Elsewhere (and with the
+        // drawing tools) the class cursor, the red crosshair.
         WM_SETCURSOR
             if wparam.0 == hwnd.0 as usize
                 && (lparam.0 & 0xFFFF) as u32 == HTCLIENT
@@ -579,12 +624,13 @@ unsafe fn wndproc_inner(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) ->
         {
             let mut pt = POINT::default();
             // SAFETY: reads the cursor position and maps it into our client area.
-            let over_item = unsafe {
-                GetCursorPos(&mut pt).is_ok()
-                    && ScreenToClient(hwnd, &mut pt).as_bool()
-                    && ctx.editor.hit_test(ctx.view.to_image(pt.x, pt.y)).is_some()
+            let in_client =
+                unsafe { GetCursorPos(&mut pt).is_ok() && ScreenToClient(hwnd, &mut pt).as_bool() };
+            let shape = if in_client {
+                select_cursor(&ctx.editor, ctx.view.to_image(pt.x, pt.y))
+            } else {
+                IDC_ARROW
             };
-            let shape = if over_item { IDC_SIZEALL } else { IDC_ARROW };
             // SAFETY: a shared system cursor, never freed.
             unsafe {
                 if let Ok(cursor) = LoadCursorW(None, shape) {
@@ -643,6 +689,7 @@ unsafe fn wndproc_inner(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) ->
         }
         WM_COMMAND => {
             let id = (wparam.0 & 0xFFFF) as i32;
+            let mut saved = SaveOutcome::Nothing;
             if let Some(tool) = tool_of(id) {
                 ctx.editor.set_tool(tool);
             } else if let Some(color) = color_of(id) {
@@ -657,7 +704,7 @@ unsafe fn wndproc_inner(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) ->
                     ID_REDO => {
                         ctx.editor.redo();
                     }
-                    ID_SAVE => save(hwnd, ctx),
+                    ID_SAVE => saved = save(hwnd, ctx),
                     ID_COPY => copy(hwnd, ctx),
                     _ => {}
                 }
@@ -669,6 +716,8 @@ unsafe fn wndproc_inner(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) ->
                 let _ = SetFocus(Some(hwnd));
             }
             redraw(hwnd);
+            // Last, with `ctx` no longer in use: this creates a window or shows a message box.
+            report_save(saved);
             LRESULT(0)
         }
         WM_DRAWITEM => {
@@ -703,6 +752,19 @@ unsafe fn wndproc_inner(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) ->
         }
         // SAFETY: default handling.
         _ => unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
+    }
+}
+
+/// The system cursor for the Select tool at `p` (image px): the resize direction over a handle
+/// of the selected annotation, the move cursor over any annotation, the arrow elsewhere.
+fn select_cursor(editor: &Editor, p: Point) -> PCWSTR {
+    match editor.resize_cursor(p) {
+        Some(ResizeCursor::NwSe) => IDC_SIZENWSE,
+        Some(ResizeCursor::NeSw) => IDC_SIZENESW,
+        Some(ResizeCursor::WestEast) => IDC_SIZEWE,
+        Some(ResizeCursor::NorthSouth) => IDC_SIZENS,
+        None if editor.hit_test(p).is_some() => IDC_SIZEALL,
+        None => IDC_ARROW,
     }
 }
 
@@ -742,6 +804,7 @@ fn handle_key(hwnd: HWND, ctx: &mut Ctx, vk: u16) {
         GetKeyState(k.0 as i32) < 0
     };
     let ctrl = down(VK_CONTROL);
+    let mut saved = SaveOutcome::Nothing;
     if vk == VK_RETURN.0 {
         match enter_action(down(VK_SHIFT), down(VK_MENU)) {
             EnterAction::NewLine => ctx.editor.on_newline(),
@@ -768,12 +831,14 @@ fn handle_key(hwnd: HWND, ctx: &mut Ctx, vk: u16) {
     } else if ctrl && vk == b'Z' as u16 {
         ctx.editor.undo();
     } else if ctrl && vk == b'S' as u16 {
-        save(hwnd, ctx);
+        saved = save(hwnd, ctx);
     } else if ctrl && vk == b'C' as u16 && !ctx.editor.is_typing() {
         copy(hwnd, ctx);
     }
     sync_toolbar(hwnd, ctx);
     redraw(hwnd);
+    // Last, with `ctx` no longer in use: this creates a window or shows a message box.
+    report_save(saved);
 }
 
 /// Window (client) coordinates from a mouse message → image pixels.
@@ -810,20 +875,13 @@ fn redraw(hwnd: HWND) {
     }
 }
 
-/// Rebuild the canvas source when the pixel items changed (a highlight or redaction drawn,
-/// moved, undone or redone), so the screen shows the pixels the export will contain. A pixel
-/// item being dragged by the Select tool is left out (and drawn as a preview instead), so the
-/// drag costs one rebuild at its start and one at its end, not one per mouse move.
+/// Rebuild the canvas source when the pixel items changed (a highlight, redaction or spotlight
+/// drawn, moved, undone or redone), so the screen shows the pixels the export will contain.
+/// What is being dragged is left out and drawn live instead ([`Editor::canvas_pixels`]): a pixel
+/// item moved or resized by the Select tool, and every spotlight while one is drawn or dragged.
+/// A drag so costs one rebuild at its start and one at its end, not one per mouse move.
 fn sync_source(ctx: &mut Ctx) {
-    let moving = ctx.editor.moving_index();
-    let pixels: Vec<Item> = ctx
-        .editor
-        .items()
-        .iter()
-        .enumerate()
-        .filter(|&(i, item)| item.is_pixel() && Some(i) != moving)
-        .map(|(_, item)| item.clone())
-        .collect();
+    let pixels = ctx.editor.canvas_pixels();
     if pixels == ctx.src_pixels {
         return;
     }
@@ -879,7 +937,13 @@ fn paint(hwnd: HWND, ctx: &mut Ctx) {
         // Keep annotations inside the picture while previewing.
         let saved = SaveDC(back);
         IntersectClipRect(back, v.ox, v.oy, v.ox + v.px(iw), v.oy + v.px(ih));
-        // The shape being drawn, or a pixel item being moved (left out of `src` meanwhile).
+        // Spotlights in hand: darken outside all of them live, under the vector items, as the
+        // pixel layer will.
+        if let Some(keep) = ctx.editor.live_spotlights() {
+            dim_outside(back, &keep, v, view_rect(v, Rect::new(0, 0, iw, ih)));
+        }
+        // The shape being drawn, or a pixel item being moved or resized (left out of `src`
+        // meanwhile).
         let preview = ctx.editor.preview().or_else(|| {
             let item = ctx.editor.items().get(ctx.editor.moving_index()?)?;
             item.is_pixel().then(|| item.clone())
@@ -911,10 +975,32 @@ fn paint(hwnd: HWND, ctx: &mut Ctx) {
             let _ = DrawFocusRect(back, &frame);
         }
         let _ = RestoreDC(back, saved);
+        // The resize handles go over everything, and are not clipped to the picture: one on the
+        // picture's edge shows whole. On screen only — the export never calls this.
+        let half = crate::platform::dpi::scale(HANDLE_HALF, ctx.dpi);
+        for (_, at) in ctx.editor.handles() {
+            paint_handle(back, v.ox + v.px(at.x), v.oy + v.px(at.y), half);
+        }
 
         let _ = BitBlt(hdc, 0, 0, cw, ch, Some(back), 0, 0, SRCCOPY);
         drop(buffer);
         let _ = EndPaint(hwnd, &ps);
+    }
+}
+
+/// A resize handle: a white square with a black edge, centred on `(x, y)` (device px), so it
+/// reads on any screenshot.
+fn paint_handle(hdc: HDC, x: i32, y: i32, half: i32) {
+    let square = RECT {
+        left: x - half,
+        top: y - half,
+        right: x + half + 1,
+        bottom: y + half + 1,
+    };
+    // SAFETY: fills and frames a rectangle on the DC we are given with stock brushes.
+    unsafe {
+        FillRect(hdc, &square, HBRUSH(GetStockObject(WHITE_BRUSH).0));
+        FrameRect(hdc, &square, HBRUSH(GetStockObject(BLACK_BRUSH).0));
     }
 }
 
@@ -945,19 +1031,21 @@ fn paint_items(
 fn paint_item(hdc: HDC, item: &Item, view: View) {
     match item {
         Item::Rect(r, style) => outline(hdc, *r, *style, view),
+        Item::Ellipse(r, style) => draw_ellipse(hdc, *r, *style, view),
+        Item::Line { from, to, style } => draw_line(hdc, *from, *to, *style, view),
         Item::Text { rect, text, style } => {
             outline(hdc, *rect, *style, view);
             draw_text(hdc, *rect, text, style.color, view);
         }
         Item::Arrow { from, to, style } => draw_arrow(hdc, *from, *to, *style, view),
         Item::Step { at, number, style } => draw_step(hdc, *at, *number, *style, view),
-        Item::Highlight(..) | Item::Pixelate(_) | Item::BlackBox(_) => {}
+        Item::Highlight(..) | Item::Pixelate(_) | Item::BlackBox(_) | Item::Spotlight(_) => {}
     }
 }
 
 /// The shape being dragged. Pixel items are only applied to the pixels on release, so until
-/// then a highlight is shown by a GDI alpha blend at the same opacity and a pixelate area by a
-/// dotted frame.
+/// then a highlight is shown by a GDI alpha blend at the same opacity, and a pixelate area or a
+/// spotlight by a dotted frame (the darkening around a spotlight is [`dim_outside`]).
 fn paint_preview(hdc: HDC, item: &Item, view: View) {
     match item {
         Item::Highlight(r, color) => alpha_fill(hdc, *r, *color, view),
@@ -969,7 +1057,7 @@ fn paint_preview(hdc: HDC, item: &Item, view: View) {
                 FillRect(hdc, &vr, HBRUSH(GetStockObject(BLACK_BRUSH).0));
             }
         }
-        Item::Pixelate(r) => {
+        Item::Pixelate(r) | Item::Spotlight(r) => {
             let vr = view_rect(view, *r);
             // SAFETY: draws a dotted (XOR) frame on the DC we are given.
             unsafe {
@@ -1011,6 +1099,23 @@ fn shade_outside(hdc: HDC, keep: RECT, image: RECT) {
     // SAFETY: draws a dotted (XOR) frame on the DC we are given.
     unsafe {
         let _ = DrawFocusRect(hdc, &keep);
+    }
+}
+
+/// Darken `image` (device px) outside every rectangle of `keep` (image px), once: the live
+/// picture of what [`imaging::dim_outside`] does to the pixels when the spotlights are applied.
+/// One blend over the image with the kept areas cut out of the clip region, so overlapping
+/// areas are not darkened twice here either.
+fn dim_outside(hdc: HDC, keep: &[Rect], view: View, image: RECT) {
+    // SAFETY: narrows the clip region of the DC we are given and restores it before returning.
+    unsafe {
+        let saved = SaveDC(hdc);
+        for r in keep {
+            let vr = view_rect(view, *r);
+            ExcludeClipRect(hdc, vr.left, vr.top, vr.right, vr.bottom);
+        }
+        blend_fill(hdc, image, [0, 0, 0], SPOTLIGHT_ALPHA);
+        let _ = RestoreDC(hdc, saved);
     }
 }
 
@@ -1134,6 +1239,46 @@ fn outline(hdc: HDC, r: Rect, style: Style, view: View) {
     }
 }
 
+/// An ellipse outline drawn just inside `r`, like [`outline`].
+fn draw_ellipse(hdc: HDC, r: Rect, style: Style, view: View) {
+    let width = view.px(style.thickness.px()).max(1);
+    let vr = view_rect(view, r);
+    // SAFETY: pen/brush selection and drawing on the DC we are given; both are restored and the
+    // pen deleted before returning.
+    unsafe {
+        let pen = CreatePen(PS_INSIDEFRAME, width, colorref(style.color));
+        let old_pen = SelectObject(hdc, HGDIOBJ(pen.0));
+        let old_brush = SelectObject(hdc, GetStockObject(HOLLOW_BRUSH));
+        let _ = Ellipse(hdc, vr.left, vr.top, vr.right, vr.bottom);
+        SelectObject(hdc, old_pen);
+        SelectObject(hdc, old_brush);
+        let _ = DeleteObject(HGDIOBJ(pen.0));
+    }
+}
+
+/// A straight line from `from` to `to`: an arrow's shaft without the head.
+fn draw_line(hdc: HDC, from: Point, to: Point, style: Style, view: View) {
+    let at = |p: Point| POINT {
+        x: view.ox + view.px(p.x),
+        y: view.oy + view.px(p.y),
+    };
+    let (a, b) = (at(from), at(to));
+    // SAFETY: line drawing on the DC we are given; the pen is deselected and deleted before
+    // returning.
+    unsafe {
+        let pen = CreatePen(
+            PS_SOLID,
+            view.px(style.thickness.px()).max(1),
+            colorref(style.color),
+        );
+        let old_pen = SelectObject(hdc, HGDIOBJ(pen.0));
+        let _ = MoveToEx(hdc, a.x, a.y, None);
+        let _ = LineTo(hdc, b.x, b.y);
+        SelectObject(hdc, old_pen);
+        let _ = DeleteObject(HGDIOBJ(pen.0));
+    }
+}
+
 /// An arrow with a filled head ([`arrow_geometry`]).
 fn draw_arrow(hdc: HDC, from: Point, to: Point, style: Style, view: View) {
     let g = arrow_geometry(from, to, style.thickness.px());
@@ -1227,7 +1372,7 @@ fn make_source_dc(img: &Rgba) -> Result<Surface> {
 }
 
 /// Render `items` onto a copy of `img` at full resolution (what Save/Copy produce): the pixel
-/// items (pixelate) change the pixels first, then the outlines and text are drawn on top. The
+/// items (highlight, pixelate, black box, spotlight) change the pixels first, then the outlines and text are drawn on top. The
 /// redacted pixels are what gets encoded — the original detail is not in the output at all.
 pub fn render(img: &Rgba, items: &[Item]) -> Result<Rgba> {
     let surface = make_source_dc(&apply_pixel_layer(img, items))?;
@@ -1279,32 +1424,105 @@ fn finish_typing(ctx: &mut Ctx) {
     ctx.editor.on_enter();
 }
 
-fn save(hwnd: HWND, ctx: &mut Ctx) {
-    finish_typing(ctx);
-    if ctx.editor.doc().is_empty() {
-        set_status(hwnd, ctx, "nothing to save yet");
-        return;
+/// What a Save did. The window shows [`SaveOutcome::status`] in its title straight away;
+/// [`report_save`] tells the user the rest once the window state is no longer in use.
+#[derive(Debug)]
+enum SaveOutcome {
+    /// There was nothing to save (no annotation and no crop).
+    Nothing,
+    /// The annotated copy was written to `path`; `image` is what it contains (annotated and
+    /// cropped), for the preview panel.
+    Saved { path: PathBuf, image: Rgba },
+    /// Nothing was written.
+    Failed(anyhow::Error),
+}
+
+impl SaveOutcome {
+    /// The short note for the title bar.
+    fn status(&self) -> String {
+        match self {
+            SaveOutcome::Nothing => "nothing to save yet".into(),
+            SaveOutcome::Saved { path, .. } => {
+                let name = path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                format!("saved as {name}")
+            }
+            SaveOutcome::Failed(_) => "save failed".into(),
+        }
     }
-    let quality = crate::dispatch::with_app(|a| a.settings.screenshot.jpeg_quality).unwrap_or(90);
-    let result = export(&ctx.image, ctx.editor.items(), ctx.editor.crop()).and_then(|img| {
-        let (dir, name) = annotated_target(&ctx.source);
-        imaging::save_image_unique(&img, &dir, &name, quality).map_err(|e| anyhow!("{e}"))
+}
+
+/// Export `doc` over `image` and write it next to `source` ([`annotated_target`]). No window
+/// state and no UI, so the whole save is tested.
+fn save_annotated(image: &Rgba, doc: &Doc, source: &Path, quality: u8) -> SaveOutcome {
+    if doc.is_empty() {
+        return SaveOutcome::Nothing;
+    }
+    let saved = export(image, &doc.items, doc.crop).and_then(|out| {
+        let (dir, name) = annotated_target(source);
+        let path =
+            imaging::save_image_unique(&out, &dir, &name, quality).map_err(|e| anyhow!("{e}"))?;
+        Ok((path, out))
     });
-    match result {
-        Ok(path) => {
-            ctx.saved = ctx.editor.doc();
-            let name = path
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_default();
-            tracing::info!("saved annotated screenshot to {}", path.display());
+    match saved {
+        Ok((path, image)) => SaveOutcome::Saved { path, image },
+        Err(e) => SaveOutcome::Failed(e),
+    }
+}
+
+/// Save the annotated copy and note the result in the title bar. The caller passes the outcome
+/// to [`report_save`] as the last thing it does: that part creates a window or shows a message
+/// box, which must not happen while the window state is in use.
+fn save(hwnd: HWND, ctx: &mut Ctx) -> SaveOutcome {
+    finish_typing(ctx);
+    let doc = ctx.editor.doc();
+    let quality = crate::dispatch::with_app(|a| a.settings.screenshot.jpeg_quality).unwrap_or(90);
+    let outcome = save_annotated(&ctx.image, &doc, &ctx.source, quality);
+    if let SaveOutcome::Saved { path, .. } = &outcome {
+        ctx.saved = doc;
+        tracing::info!("saved annotated screenshot to {}", path.display());
+    }
+    set_status(hwnd, ctx, &outcome.status());
+    outcome
+}
+
+/// Tell the user what a Save did, beyond the title bar: the saved file in the preview panel
+/// (the same flyout a capture ends with, so the cropped, annotated result is visible and Open /
+/// Folder / Copy / Pin are at hand), or the reason it failed.
+///
+/// Takes no window state, and must run after the handler's last use of it: creating the flyout
+/// and showing a message box can both re-enter the window procedure.
+fn report_save(outcome: SaveOutcome) {
+    match outcome {
+        SaveOutcome::Nothing => {}
+        SaveOutcome::Saved { path, image } => {
             crate::history::record(&path, config::history::EntryKind::Annotated);
-            set_status(hwnd, ctx, &format!("saved as {name}"));
+            show_saved_flyout(&path, &image);
         }
-        Err(e) => {
-            tracing::warn!("could not save the annotated screenshot: {e:#}");
-            set_status(hwnd, ctx, "save failed");
+        SaveOutcome::Failed(e) => {
+            crate::notify::error("The annotated screenshot could not be saved.", e)
         }
+    }
+}
+
+/// Show the post-capture flyout for a saved annotated copy, replacing the current one. The app
+/// state is borrowed only to read the dispatch window and, separately, to store the flyout:
+/// never across the window creation in between.
+fn show_saved_flyout(path: &Path, image: &Rgba) {
+    // No app state: the editor was opened outside the tray app, which has no flyout.
+    let Some(dispatch_hwnd) = crate::dispatch::with_app(|a| a.dispatch_hwnd) else {
+        return;
+    };
+    match crate::ui::flyout::Flyout::show(dispatch_hwnd, path, image) {
+        Ok(flyout) => {
+            let previous = crate::dispatch::with_app(|a| a.flyout.replace(flyout)).flatten();
+            // Dropping a flyout destroys its window: outside the borrow as well.
+            drop(previous);
+        }
+        // The file is saved and the title bar says so; only the preview is missing.
+        Err(e) => tracing::warn!("could not show the saved file's preview: {e:#}"),
     }
 }
 
@@ -1343,8 +1561,10 @@ fn confirm_close(hwnd: HWND, dirty: bool) -> bool {
         let Some(ctx) = ctx_of(hwnd) else {
             return true;
         };
-        save(hwnd, ctx);
-        !ctx.dirty() // closes only if the save worked
+        let outcome = save(hwnd, ctx);
+        let saved = !ctx.dirty(); // closes only if the save worked
+        report_save(outcome); // after the last use of `ctx`
+        saved
     } else {
         answer == IDNO
     }
@@ -1639,15 +1859,42 @@ mod tests {
 
     #[test]
     fn toolbar_buttons_do_not_overlap_and_fit_the_minimum_width() {
-        let mut spans: Vec<(i32, i32)> = (0..BUTTONS.len())
-            .map(|i| (button_x(i), button_x(i) + BUTTONS[i].3))
-            .collect();
-        spans.sort_unstable();
-        for w in spans.windows(2) {
-            assert!(w[0].1 <= w[1].0, "{:?} overlaps {:?}", w[0], w[1]);
+        // Row by row: buttons in different rows share x positions, never a row.
+        for row in 0..ROWS {
+            let mut spans: Vec<(i32, i32)> = (0..BUTTONS.len())
+                .filter(|&i| BUTTONS[i].5 == row)
+                .map(|i| (button_x(i), button_x(i) + BUTTONS[i].3))
+                .collect();
+            assert!(!spans.is_empty(), "row {row} has no buttons");
+            spans.sort_unstable();
+            for w in spans.windows(2) {
+                assert!(
+                    w[0].1 <= w[1].0,
+                    "row {row}: {:?} overlaps {:?}",
+                    w[0],
+                    w[1]
+                );
+            }
+            let right = spans.last().map(|s| s.1).unwrap();
+            assert!(
+                right + MARGIN <= TOOLBAR_W,
+                "row {row} of the toolbar is {right} px wide"
+            );
         }
-        let right = spans.last().map(|s| s.1).unwrap();
-        assert!(right + MARGIN <= TOOLBAR_W, "toolbar is {right} px wide");
+    }
+
+    #[test]
+    fn toolbar_rows_stack_inside_the_toolbar_and_it_fits_a_small_laptop() {
+        for (i, b) in BUTTONS.iter().enumerate() {
+            assert!((0..ROWS).contains(&b.5), "button {i} is in row {}", b.5);
+            assert!(button_y(i) >= ROW_GAP, "button {i}");
+            assert!(button_y(i) + ROW_H + ROW_GAP <= TOOLBAR_H, "button {i}");
+        }
+        assert_eq!(button_y(0) + ROW_H + ROW_GAP, button_y(BUTTONS.len() - 1));
+        // The tools share the first row; style and actions the second.
+        for b in BUTTONS {
+            assert_eq!(b.5 == 0, tool_of(b.0).is_some(), "id {}", b.0);
+        }
     }
 
     #[test]
@@ -1811,5 +2058,290 @@ mod tests {
         let second = imaging::save_image_unique(&img, &tdir, &name, 90).unwrap();
         assert_eq!(first, dir.join("shot_annotated.png"));
         assert_eq!(second, dir.join("shot_annotated_2.png"));
+    }
+
+    #[test]
+    fn save_writes_the_cropped_annotated_copy_and_hands_it_back_for_the_preview() {
+        let tmp = TestDir::new("save_ok");
+        let source = tmp.0.join("shot.png");
+        let doc = Doc {
+            items: vec![Item::Rect(Rect::new(10, 10, 40, 30), Style::DEFAULT)],
+            crop: Some(Rect::new(20, 5, 50, 40)),
+        };
+        let outcome = save_annotated(&white(100, 80), &doc, &source, 90);
+        assert_eq!(outcome.status(), "saved as shot_annotated.png");
+        let SaveOutcome::Saved { path, image } = outcome else {
+            panic!("expected a saved file, got {outcome:?}");
+        };
+        assert_eq!(path, tmp.0.join("shot_annotated.png"));
+        // The preview is the saved result: cut to the crop, with the outline in it.
+        assert_eq!((image.width(), image.height()), (50, 40));
+        assert_eq!(px(&image, 10, 6), [255, 0, 0, 255]);
+        assert_eq!(imaging::load_rgba(&path).unwrap(), image);
+        // A second save never overwrites the first.
+        let again = save_annotated(&white(100, 80), &doc, &source, 90);
+        assert_eq!(again.status(), "saved as shot_annotated_2.png");
+    }
+
+    #[test]
+    fn a_crop_alone_is_worth_saving_and_an_empty_document_is_not() {
+        let tmp = TestDir::new("save_crop");
+        let source = tmp.0.join("shot.png");
+        let nothing = save_annotated(&white(40, 30), &Doc::default(), &source, 90);
+        assert!(matches!(nothing, SaveOutcome::Nothing), "{nothing:?}");
+        assert_eq!(nothing.status(), "nothing to save yet");
+        assert!(!tmp.0.join("shot_annotated.png").exists());
+
+        let doc = Doc {
+            items: Vec::new(),
+            crop: Some(Rect::new(5, 5, 20, 10)),
+        };
+        let SaveOutcome::Saved { image, .. } = save_annotated(&white(40, 30), &doc, &source, 90)
+        else {
+            panic!("a crop must be saved");
+        };
+        assert_eq!((image.width(), image.height()), (20, 10));
+    }
+
+    #[test]
+    fn a_failed_save_carries_its_reason() {
+        let tmp = TestDir::new("save_fail");
+        // The "folder" the copy should go into is a file: nothing can be created inside it.
+        let blocker = tmp.0.join("not_a_folder");
+        std::fs::write(&blocker, b"x").unwrap();
+        let doc = Doc {
+            items: vec![Item::BlackBox(Rect::new(2, 2, 10, 10))],
+            crop: None,
+        };
+        let outcome = save_annotated(&white(40, 30), &doc, &blocker.join("shot.png"), 90);
+        assert_eq!(outcome.status(), "save failed");
+        let SaveOutcome::Failed(e) = outcome else {
+            panic!("expected a failure, got {outcome:?}");
+        };
+        assert!(
+            !format!("{e:#}").is_empty(),
+            "the reason is shown to the user"
+        );
+    }
+
+    #[test]
+    fn the_select_cursor_is_resize_on_a_handle_move_on_an_item_arrow_elsewhere() {
+        let mut e = Editor::new(200, 100);
+        e.set_tool(Tool::BlackBox);
+        e.on_down(Point::new(40, 20));
+        e.on_up(Point::new(120, 70));
+        e.set_tool(Tool::Select);
+        // Not selected yet: no handles, the whole box moves.
+        assert_eq!(select_cursor(&e, Point::new(40, 20)), IDC_SIZEALL);
+        e.on_down(Point::new(80, 45));
+        e.on_up(Point::new(80, 45));
+        assert_eq!(select_cursor(&e, Point::new(40, 20)), IDC_SIZENWSE);
+        assert_eq!(select_cursor(&e, Point::new(120, 20)), IDC_SIZENESW);
+        assert_eq!(select_cursor(&e, Point::new(120, 45)), IDC_SIZEWE);
+        assert_eq!(select_cursor(&e, Point::new(80, 70)), IDC_SIZENS);
+        assert_eq!(select_cursor(&e, Point::new(80, 45)), IDC_SIZEALL);
+        assert_eq!(select_cursor(&e, Point::new(180, 90)), IDC_ARROW);
+    }
+
+    #[test]
+    fn handles_are_never_in_the_export() {
+        // Render takes the items only: a selection (and its handles) is window state.
+        let items = [Item::BlackBox(Rect::new(10, 10, 20, 20))];
+        let out = render(&white(60, 40), &items).unwrap();
+        for (x, y) in [(8, 8), (9, 9), (30, 30), (31, 31), (20, 8), (8, 20)] {
+            assert_eq!(px(&out, x, y), [255, 255, 255, 255], "({x},{y})");
+        }
+        assert_eq!(px(&out, 10, 10), [0, 0, 0, 255], "the corner pixel itself");
+    }
+
+    #[test]
+    fn ellipse_is_an_outline_inside_its_box_in_its_colour_and_thickness() {
+        // 60 × 40 box: the ellipse touches the middle of each side.
+        let r = Rect::new(10, 10, 60, 40);
+        let out = render(&white(120, 80), &[Item::Ellipse(r, Style::DEFAULT)]).unwrap();
+        assert_eq!(px(&out, 11, 30), [255, 0, 0, 255], "leftmost point");
+        assert_eq!(px(&out, 68, 30), [255, 0, 0, 255], "rightmost point");
+        assert_eq!(px(&out, 40, 11), [255, 0, 0, 255], "top");
+        assert_eq!(px(&out, 40, 48), [255, 0, 0, 255], "bottom");
+        assert_eq!(px(&out, 40, 30), [255, 255, 255, 255], "hollow middle");
+        assert_eq!(
+            px(&out, 16, 30),
+            [255, 255, 255, 255],
+            "inside the 3-px line"
+        );
+        assert_eq!(px(&out, 12, 12), [255, 255, 255, 255], "corner of the box");
+        assert_eq!(px(&out, 67, 47), [255, 255, 255, 255], "opposite corner");
+        // Nothing is drawn outside the box.
+        for y in 0..80 {
+            for x in 0..120 {
+                if !r.contains(Point::new(x as i32, y as i32)) {
+                    assert_eq!(px(&out, x, y), [255, 255, 255, 255], "({x},{y})");
+                }
+            }
+        }
+
+        let blue_thick = Style {
+            color: Color::Blue,
+            thickness: super::super::model::Thickness::Thick,
+        };
+        let out = render(&white(120, 80), &[Item::Ellipse(r, blue_thick)]).unwrap();
+        let [b0, b1, b2] = Color::Blue.rgb();
+        assert_eq!(px(&out, 14, 30), [b0, b1, b2, 255], "6 px of blue");
+        assert_eq!(px(&out, 18, 30), [255, 255, 255, 255], "then the inside");
+    }
+
+    #[test]
+    fn line_is_a_straight_stroke_without_a_head() {
+        let line = Item::Line {
+            from: Point::new(5, 20),
+            to: Point::new(60, 20),
+            style: Style::DEFAULT,
+        };
+        let out = render(&white(80, 40), &[line]).unwrap();
+        for x in [6, 20, 40, 58] {
+            assert_eq!(px(&out, x, 20), [255, 0, 0, 255], "on the line at x = {x}");
+        }
+        assert_eq!(px(&out, 30, 19), [255, 0, 0, 255], "3 px wide");
+        assert_eq!(px(&out, 30, 21), [255, 0, 0, 255], "3 px wide");
+        assert_eq!(px(&out, 30, 23), [255, 255, 255, 255], "off the line");
+        assert_eq!(px(&out, 30, 17), [255, 255, 255, 255], "off the line");
+        assert_eq!(px(&out, 66, 20), [255, 255, 255, 255], "past the end");
+        // Where an arrow would have its head (see `arrow_is_drawn_red_with_a_filled_head`).
+        assert_eq!(px(&out, 50, 24), [255, 255, 255, 255], "no head");
+
+        let green_thin = Style {
+            color: Color::Green,
+            thickness: super::super::model::Thickness::Thin,
+        };
+        let diagonal = Item::Line {
+            from: Point::new(10, 5),
+            to: Point::new(40, 35),
+            style: green_thin,
+        };
+        let out = render(&white(80, 40), &[diagonal]).unwrap();
+        let [g0, g1, g2] = Color::Green.rgb();
+        assert_eq!(
+            px(&out, 25, 20),
+            [g0, g1, g2, 255],
+            "the middle of the diagonal"
+        );
+        assert_eq!(px(&out, 40, 5), [255, 255, 255, 255], "the other diagonal");
+    }
+
+    #[test]
+    fn ellipse_and_line_are_cut_by_the_crop_like_other_shapes() {
+        let items = [
+            Item::Ellipse(Rect::new(10, 10, 60, 40), Style::DEFAULT),
+            Item::Line {
+                from: Point::new(0, 60),
+                to: Point::new(99, 60),
+                style: Style::DEFAULT,
+            },
+        ];
+        let out = export(&white(100, 80), &items, Some(Rect::new(40, 5, 50, 70))).unwrap();
+        assert_eq!((out.width(), out.height()), (50, 70));
+        // (x, y) in the crop is (x + 40, y + 5) in the image.
+        assert_eq!(
+            px(&out, 0, 6),
+            [255, 0, 0, 255],
+            "top of the ellipse at x = 40"
+        );
+        assert_eq!(px(&out, 28, 25), [255, 0, 0, 255], "its rightmost point");
+        assert_eq!(
+            px(&out, 0, 55),
+            [255, 0, 0, 255],
+            "the line, at the crop's left edge"
+        );
+        assert_eq!(px(&out, 49, 55), [255, 0, 0, 255], "and at its right edge");
+    }
+
+    /// What a mid-grey (128) pixel becomes outside a spotlight.
+    fn dimmed_grey() -> [u8; 4] {
+        let a = u32::from(SPOTLIGHT_ALPHA);
+        let v = ((128 * (255 - a) + 127) / 255) as u8;
+        [v, v, v, 255]
+    }
+
+    #[test]
+    fn spotlight_darkens_the_exported_pixels_outside_its_box() {
+        let out = render(&grey(60, 40), &[Item::Spotlight(Rect::new(10, 10, 20, 15))]).unwrap();
+        let (kept, dim) = ([128, 128, 128, 255], dimmed_grey());
+        assert_eq!(dim, [58, 58, 58, 255], "128 at 45 % brightness");
+        for y in 0..40 {
+            for x in 0..60 {
+                let inside = (10..=30).contains(&x) && (10..=25).contains(&y);
+                assert_eq!(px(&out, x, y), if inside { kept } else { dim }, "({x},{y})");
+            }
+        }
+    }
+
+    #[test]
+    fn two_spotlights_do_not_darken_the_exported_background_twice() {
+        let items = [
+            Item::Spotlight(Rect::new(5, 5, 20, 15)),
+            Item::Spotlight(Rect::new(15, 10, 30, 20)),
+        ];
+        let out = render(&grey(60, 40), &items).unwrap();
+        let (kept, dim) = ([128, 128, 128, 255], dimmed_grey());
+        assert_eq!(px(&out, 8, 8), kept, "first only");
+        assert_eq!(px(&out, 40, 25), kept, "second only");
+        assert_eq!(px(&out, 20, 15), kept, "both");
+        assert_eq!(px(&out, 55, 5), dim, "neither");
+        assert_eq!(px(&out, 8, 28), dim, "neither, inside their bounding box");
+        assert!(out.pixels().all(|p| p.0 == kept || p.0 == dim));
+    }
+
+    #[test]
+    fn annotations_stay_bright_over_a_spotlights_dark_background() {
+        // The outline and the arrow are drawn after the pixels are darkened.
+        let items = [
+            Item::Rect(Rect::new(40, 5, 15, 15), Style::DEFAULT),
+            Item::Spotlight(Rect::new(5, 5, 20, 20)),
+            Item::Highlight(Rect::new(40, 25, 15, 10), Color::Yellow),
+        ];
+        let out = render(&grey(60, 40), &items).unwrap();
+        assert_eq!(
+            px(&out, 41, 12),
+            [255, 0, 0, 255],
+            "outline outside the spotlight"
+        );
+        assert_eq!(
+            px(&out, 47, 12),
+            dimmed_grey(),
+            "inside the outline: background"
+        );
+        assert_eq!(
+            px(&out, 15, 15),
+            [128, 128, 128, 255],
+            "inside the spotlight"
+        );
+        // A highlight outside is part of the pixels, so it is dimmed with them.
+        let lit = render(&grey(60, 40), &items[2..]).unwrap();
+        let (dark, bright) = (px(&out, 45, 30), px(&lit, 45, 30));
+        assert!(
+            dark[0] < bright[0] && dark[1] < bright[1],
+            "{dark:?} vs {bright:?}"
+        );
+        assert_ne!(dark, dimmed_grey(), "still tinted yellow");
+    }
+
+    #[test]
+    fn a_crop_cuts_the_spotlit_image_last() {
+        let items = [Item::Spotlight(Rect::new(10, 10, 20, 15))];
+        let out = export(&grey(60, 40), &items, Some(Rect::new(20, 5, 30, 30))).unwrap();
+        assert_eq!((out.width(), out.height()), (30, 30));
+        // (x, y) in the crop is (x + 20, y + 5) in the image.
+        assert_eq!(
+            px(&out, 0, 10),
+            [128, 128, 128, 255],
+            "still inside the spotlight"
+        );
+        assert_eq!(
+            px(&out, 10, 20),
+            [128, 128, 128, 255],
+            "its last pixel (30, 25)"
+        );
+        assert_eq!(px(&out, 11, 20), dimmed_grey());
+        assert_eq!(px(&out, 0, 0), dimmed_grey(), "above it");
     }
 }

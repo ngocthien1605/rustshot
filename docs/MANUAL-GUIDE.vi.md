@@ -152,20 +152,30 @@ giữ 100 mục mới nhất; muốn đổi con số đó, hoặc tắt lịch s
 
 ## 6. Ghi chú lên ảnh (Annotate)
 
-1. Trong ô xem trước, bấm **Annotate**. Trình ghi chú mở ra cùng ảnh vừa chụp.
+1. Trong ô xem trước, bấm **Annotate**. Trình ghi chú mở ra cùng ảnh vừa chụp. Thanh công cụ
+   có hai hàng: hàng trên là các công cụ; hàng dưới là màu, độ dày nét, **Undo**, **Redo**,
+   **Save** và **Copy**.
 2. Chọn công cụ trên thanh công cụ, hoặc nhấn phím chữ của nó:
    - **Rectangle** (`R`): kéo chuột trên ảnh để vẽ khung chữ nhật.
+   - **Ellipse** (`E`): kéo một khung; một đường viền hình bầu dục được vẽ bên trong khung đó —
+     để khoanh tròn một thứ gì đó.
    - **Text** (`T`): kéo một khung rồi gõ chữ. **Enter** đặt chữ vào ảnh; **Shift+Enter** hoặc
      **Alt+Enter** xuống dòng; **Backspace** xoá; **Esc** bỏ đoạn chữ đang gõ; bấm ra chỗ khác
      cũng đặt chữ vào ảnh.
    - **Arrow** (`A`): kéo từ chỗ mũi tên bắt đầu đến chỗ cần chỉ vào. Đầu mũi tên nằm ở chỗ bạn
      thả chuột.
+   - **Line** (`L`): kéo từ đầu này đến đầu kia: một đường thẳng, không có đầu mũi tên.
    - **Highlight** (`H`): kéo qua một đoạn chữ để tô một lớp màu trong suốt, giống bút dạ quang.
      Chữ bên dưới vẫn đọc được.
    - **Pixelate** (`P`): kéo qua những gì cần che — mật khẩu, địa chỉ e-mail, tên người. Vùng đó
      biến thành các ô vuông thô. Đọc thêm mục *Che thông tin an toàn* bên dưới.
    - **Black box** (`B`): kéo qua thứ cần che để phủ kín bằng màu đen — cách che an toàn nhất, vì
      không còn lại gì, kể cả hình dáng.
+   - **Spotlight** (`F`, viết tắt của "focus"): kéo qua phần mà người xem cần chú ý. Mọi thứ
+     **bên ngoài** khung bị làm tối trong ảnh được lưu và ảnh được chép; phần trong khung giữ
+     nguyên. Có thể vẽ nhiều khung: ảnh chỉ bị làm tối một lần, ở phía ngoài tất cả các khung
+     gộp lại, nên thêm Spotlight không làm nền tối hơn. Công cụ này không có màu và không có
+     nét.
    - **Step** (`N`): bấm để đặt một vòng tròn đánh số: ①, rồi ②, ③ … — tiện cho hướng dẫn kiểu
      "làm bước này, rồi bước kia". Vòng tròn hiện ở chỗ bạn thả chuột, nên có thể kéo để chỉnh
      vị trí. Màu tô kín vòng tròn (số màu trắng, hoặc đen trên nền vàng và trắng); tuỳ chọn nét
@@ -173,33 +183,57 @@ giữ 100 mục mới nhất; muốn đổi con số đó, hoặc tắt lịch s
    - **Crop** (`C`): kéo qua phần ảnh muốn giữ. Phần còn lại bị tô tối và bị cắt bỏ khi
      **Save** hoặc **Copy**. Kéo lại để đổi; bấm một lần (không kéo) bằng Crop để bỏ cắt. Undo
      dùng được cho cả việc cắt ảnh. Ảnh chụp gốc không bị thay đổi.
-3. **Sửa những gì đã vẽ: Select** (`S`). Bấm vào một nét để chọn — một khung chấm chấm hiện quanh
-   nó. Sau đó:
+3. **Sửa những gì đã vẽ: Select** (`S`). Bấm vào một nét để chọn — một khung chấm chấm cùng các ô
+   vuông nhỏ màu trắng (**nút nắm**) hiện quanh nó. Sau đó:
    - **kéo** để di chuyển (nét luôn nằm trong ảnh);
+   - **kéo một nút nắm** để đổi kích thước. Một khung (Rectangle, Ellipse, Text, Highlight,
+     Pixelate, Black box, Spotlight) có tám nút nắm: nút ở góc di chuyển hai cạnh, nút ở giữa
+     một cạnh di chuyển cạnh đó. Arrow và Line có một nút nắm ở mỗi đầu. Kéo một nút nắm vượt
+     qua cạnh đối diện thì nét lật sang phía bên kia. Không thể thu một nét nhỏ hơn 6 điểm ảnh
+     hay kéo nó ra ngoài ảnh. Vòng tròn Step không có nút nắm: tuỳ chọn nét quyết định cỡ của
+     nó;
    - nhấn **Delete** để xoá;
    - bấm một nút **màu** hoặc **nét** để đổi;
    - nhấn **Esc** (hoặc bấm vào chỗ trống) để bỏ chọn.
 
-   Nét nằm trên cùng được chọn trước; khung chữ nhật được chọn khi bấm vào cạnh của nó, nên vẫn
-   bấm được vào những gì bên trong. Khi trỏ chuột nằm trên một nét, con trỏ thành mũi tên bốn
-   chiều. Mỗi lần di chuyển, xoá hay đổi màu là một bước cho Undo.
+   Nét nằm trên cùng được chọn trước; khung chữ nhật, hình bầu dục và Spotlight được chọn khi
+   bấm vào cạnh (đường viền) của chúng, nên vẫn bấm được vào những gì bên trong. Khi trỏ chuột
+   nằm trên một nét, con trỏ thành mũi tên bốn chiều; trên một nút nắm, con trỏ thành mũi tên
+   hai chiều cho biết hướng đổi kích thước. Với một khung rất nhỏ, chỉ các nút nắm ở góc hiện
+   ra, để còn chỗ kéo cả khung đi. Mỗi lần di chuyển, đổi kích thước, xoá hay đổi màu là một
+   bước cho Undo.
 4. **Màu và nét.** Sáu ô màu (đỏ, vàng, xanh lá, xanh dương, đen, trắng — phím `1` đến `6`) và
    ba mẫu nét (mảnh, vừa, đậm — `[` mảnh hơn, `]` đậm hơn) đặt màu và độ dày nét cho **công cụ
    đang chọn**. Ô màu hoặc nét đang chọn có khung đôi màu sẫm. Mỗi công cụ nhớ lựa chọn riêng:
-   Rectangle, Text, Arrow và Step mặc định màu đỏ, nét vừa (y như trước khi có các tuỳ chọn
-   này), Highlight mặc định màu vàng. Khi công cụ không dùng một tuỳ chọn, các nút đó bị làm mờ
-   (Pixelate và Black box không có màu; Highlight, Pixelate và Black box không có nét). Chọn màu
-   trong lúc đang gõ chữ thì đoạn chữ đang gõ đổi màu theo.
-5. **Undo** (`Ctrl+Z`) bỏ thay đổi vừa làm — một nét mới, một lần di chuyển, xoá hay đổi màu;
+   Rectangle, Ellipse, Text, Arrow, Line và Step mặc định màu đỏ, nét vừa (y như trước khi có
+   các tuỳ chọn này), Highlight mặc định màu vàng. Khi công cụ không dùng một tuỳ chọn, các nút
+   đó bị làm mờ (Pixelate, Black box và Spotlight không có màu; Highlight, Pixelate, Black box
+   và Spotlight không có nét). Chọn màu trong lúc đang gõ chữ thì đoạn chữ đang gõ đổi màu theo.
+5. **Undo** (`Ctrl+Z`) bỏ thay đổi vừa làm — một nét mới, một lần di chuyển, đổi kích thước, xoá
+   hay đổi màu;
    **Redo** (`Ctrl+Y` hoặc `Ctrl+Shift+Z`) lấy lại thay đổi đó. Làm thay đổi mới sau khi Undo thì
    không Redo được nữa; nút Redo bị làm mờ khi không có gì để lấy lại.
 6. **Save** (`Ctrl+S`) lưu một bản sao cạnh ảnh gốc, tên `…_annotated.png`; lưu lần nữa thành
    `…_annotated_2.png`, v.v. **Ảnh gốc không bao giờ bị thay đổi.**
-7. **Copy** (`Ctrl+C`) chép ảnh đã ghi chú vào clipboard.
+
+   **Sau khi Save bạn sẽ thấy:** trình ghi chú vẫn mở y như cũ (phần bị Crop cắt vẫn chỉ được
+   tô tối ở đó, để bạn sửa tiếp), thanh tiêu đề ghi `saved as …_annotated.png`, và **ô xem
+   trước** mở ra ở góc dưới bên phải màn hình, hiện **tệp vừa lưu** — đã cắt và đã ghi chú,
+   đúng như trên đĩa — cùng các nút như sau khi chụp (**Open**, **Folder**, **Copy**, **Pin**,
+   …; **Annotate** mở bản đã lưu trong một trình ghi chú mới). Nếu không ghi được tệp, một
+   thông báo cho biết lý do và không có gì được lưu.
+7. **Copy** (`Ctrl+C`) chép ảnh đã ghi chú vào clipboard; thanh tiêu đề ghi
+   `copied to clipboard`.
 
 Đóng trình ghi chú khi còn nét chưa lưu thì RustShot hỏi có lưu không. Nét vẽ được đặt theo độ
-phân giải gốc của ảnh, dù cửa sổ trình ghi chú nhỏ đến đâu. Highlight, Pixelate và Black box thay
-đổi chính điểm ảnh, nên chúng luôn nằm *dưới* khung, mũi tên, chữ và vòng tròn đánh số.
+phân giải gốc của ảnh, dù cửa sổ trình ghi chú nhỏ đến đâu. Highlight, Pixelate, Black box và
+Spotlight thay đổi chính điểm ảnh, nên chúng luôn nằm *dưới* khung, hình bầu dục, đường thẳng,
+mũi tên, chữ và vòng tròn đánh số — một mũi tên đỏ vẽ trên phần bị Spotlight làm tối vẫn đỏ tươi.
+
+**Chi tiết về Spotlight.** Việc làm tối luôn được áp dụng sau cùng: một vùng Highlight hay vùng
+che nằm ngoài các khung Spotlight bị làm tối cùng với phần nền, bất kể bạn vẽ cái nào trước.
+Trong lúc bạn vẽ, di chuyển hay đổi kích thước một Spotlight, trình ghi chú làm tối ảnh ngay
+quanh tất cả các khung Spotlight.
 
 **Số thứ tự của Step** đếm từ 1: vòng tròn mới mang số lớn hơn số lớn nhất đang có trên ảnh một
 đơn vị. Undo hoặc xoá vòng tròn cuối cùng thì số đó được dùng lại; xoá một vòng ở giữa thì các
@@ -221,8 +255,11 @@ mấy điều:
 - **Kéo rộng ra quá mép** của thứ cần che, để không ô nào chỉ chứa một phần của chữ.
 - Pixelate dành cho chữ cỡ bình thường như tên, địa chỉ, con số. Chữ rất to hay một logo quen
   thuộc vẫn có thể nhận ra qua hình dáng thô: hãy dùng **Black box** cho những thứ đó.
-- Trong lúc bạn **kéo** một vùng Pixelate hay Black box bằng Select, trình ghi chú hiện thứ nằm
-  bên dưới cho đến khi thả chuột (chỉ trên màn hình; ảnh được lưu luôn bị che).
+- Trong lúc bạn **kéo** hoặc **đổi kích thước** một vùng Pixelate hay Black box bằng Select,
+  trình ghi chú hiện thứ nằm bên dưới cho đến khi thả chuột (chỉ trên màn hình; ảnh được lưu
+  luôn bị che).
+- **Spotlight không che gì cả.** Phần bị làm tối vẫn đọc được; hãy dùng Pixelate hoặc Black box
+  cho những thứ không được để lộ.
 
 ## 7. Quay video (MP4)
 
@@ -323,15 +360,16 @@ chọn phím tắt khác trong RustShot. Chú thích ở khay cho biết có bao
 
 | Thao tác | Phím |
 |---|---|
-| Công cụ Select / Crop / Rectangle / Text / Arrow | `S` / `C` / `R` / `T` / `A` |
-| Công cụ Highlight / Pixelate / Black box / Step | `H` / `P` / `B` / `N` |
+| Công cụ Select / Crop / Rectangle / Ellipse / Text | `S` / `C` / `R` / `E` / `T` |
+| Công cụ Arrow / Line / Highlight / Pixelate | `A` / `L` / `H` / `P` |
+| Công cụ Black box / Spotlight / Step | `B` / `F` / `N` |
 | Xoá nét đang chọn | `Delete` |
 | Màu đỏ, vàng, xanh lá, xanh dương, đen, trắng | `1` … `6` |
 | Nét mảnh hơn / đậm hơn | `[` / `]` |
 | Undo / Redo | `Ctrl+Z` / `Ctrl+Y` hoặc `Ctrl+Shift+Z` |
 | Save / Copy | `Ctrl+S` / `Ctrl+C` |
 | Đặt chữ vào ảnh / xuống dòng trong chữ | `Enter` / `Shift+Enter` hoặc `Alt+Enter` |
-| Huỷ chữ, hình đang vẽ hoặc đang di chuyển, nếu không thì bỏ chọn; nếu không có gì thì đóng trình ghi chú | `Esc` |
+| Huỷ chữ, hình đang vẽ, đang di chuyển hoặc đang đổi kích thước, nếu không thì bỏ chọn; nếu không có gì thì đóng trình ghi chú | `Esc` |
 
 Khi đang gõ chữ trong khung Text, các phím đơn (`R`, `1`, `[` …) gõ ra chữ thay vì làm phím tắt.
 
