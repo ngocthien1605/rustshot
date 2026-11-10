@@ -643,6 +643,7 @@ unsafe fn wndproc_inner(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) ->
         }
         WM_COMMAND => {
             let id = (wparam.0 & 0xFFFF) as i32;
+            let mut saved = SaveOutcome::Nothing;
             if let Some(tool) = tool_of(id) {
                 ctx.editor.set_tool(tool);
             } else if let Some(color) = color_of(id) {
@@ -657,7 +658,7 @@ unsafe fn wndproc_inner(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) ->
                     ID_REDO => {
                         ctx.editor.redo();
                     }
-                    ID_SAVE => save(hwnd, ctx),
+                    ID_SAVE => saved = save(hwnd, ctx),
                     ID_COPY => copy(hwnd, ctx),
                     _ => {}
                 }
@@ -669,6 +670,8 @@ unsafe fn wndproc_inner(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) ->
                 let _ = SetFocus(Some(hwnd));
             }
             redraw(hwnd);
+            // Last, with `ctx` no longer in use: this creates a window or shows a message box.
+            report_save(saved);
             LRESULT(0)
         }
         WM_DRAWITEM => {
@@ -742,6 +745,7 @@ fn handle_key(hwnd: HWND, ctx: &mut Ctx, vk: u16) {
         GetKeyState(k.0 as i32) < 0
     };
     let ctrl = down(VK_CONTROL);
+    let mut saved = SaveOutcome::Nothing;
     if vk == VK_RETURN.0 {
         match enter_action(down(VK_SHIFT), down(VK_MENU)) {
             EnterAction::NewLine => ctx.editor.on_newline(),
@@ -768,12 +772,14 @@ fn handle_key(hwnd: HWND, ctx: &mut Ctx, vk: u16) {
     } else if ctrl && vk == b'Z' as u16 {
         ctx.editor.undo();
     } else if ctrl && vk == b'S' as u16 {
-        save(hwnd, ctx);
+        saved = save(hwnd, ctx);
     } else if ctrl && vk == b'C' as u16 && !ctx.editor.is_typing() {
         copy(hwnd, ctx);
     }
     sync_toolbar(hwnd, ctx);
     redraw(hwnd);
+    // Last, with `ctx` no longer in use: this creates a window or shows a message box.
+    report_save(saved);
 }
 
 /// Window (client) coordinates from a mouse message → image pixels.
@@ -1279,32 +1285,105 @@ fn finish_typing(ctx: &mut Ctx) {
     ctx.editor.on_enter();
 }
 
-fn save(hwnd: HWND, ctx: &mut Ctx) {
-    finish_typing(ctx);
-    if ctx.editor.doc().is_empty() {
-        set_status(hwnd, ctx, "nothing to save yet");
-        return;
+/// What a Save did. The window shows [`SaveOutcome::status`] in its title straight away;
+/// [`report_save`] tells the user the rest once the window state is no longer in use.
+#[derive(Debug)]
+enum SaveOutcome {
+    /// There was nothing to save (no annotation and no crop).
+    Nothing,
+    /// The annotated copy was written to `path`; `image` is what it contains (annotated and
+    /// cropped), for the preview panel.
+    Saved { path: PathBuf, image: Rgba },
+    /// Nothing was written.
+    Failed(anyhow::Error),
+}
+
+impl SaveOutcome {
+    /// The short note for the title bar.
+    fn status(&self) -> String {
+        match self {
+            SaveOutcome::Nothing => "nothing to save yet".into(),
+            SaveOutcome::Saved { path, .. } => {
+                let name = path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                format!("saved as {name}")
+            }
+            SaveOutcome::Failed(_) => "save failed".into(),
+        }
     }
-    let quality = crate::dispatch::with_app(|a| a.settings.screenshot.jpeg_quality).unwrap_or(90);
-    let result = export(&ctx.image, ctx.editor.items(), ctx.editor.crop()).and_then(|img| {
-        let (dir, name) = annotated_target(&ctx.source);
-        imaging::save_image_unique(&img, &dir, &name, quality).map_err(|e| anyhow!("{e}"))
+}
+
+/// Export `doc` over `image` and write it next to `source` ([`annotated_target`]). No window
+/// state and no UI, so the whole save is tested.
+fn save_annotated(image: &Rgba, doc: &Doc, source: &Path, quality: u8) -> SaveOutcome {
+    if doc.is_empty() {
+        return SaveOutcome::Nothing;
+    }
+    let saved = export(image, &doc.items, doc.crop).and_then(|out| {
+        let (dir, name) = annotated_target(source);
+        let path =
+            imaging::save_image_unique(&out, &dir, &name, quality).map_err(|e| anyhow!("{e}"))?;
+        Ok((path, out))
     });
-    match result {
-        Ok(path) => {
-            ctx.saved = ctx.editor.doc();
-            let name = path
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_default();
-            tracing::info!("saved annotated screenshot to {}", path.display());
+    match saved {
+        Ok((path, image)) => SaveOutcome::Saved { path, image },
+        Err(e) => SaveOutcome::Failed(e),
+    }
+}
+
+/// Save the annotated copy and note the result in the title bar. The caller passes the outcome
+/// to [`report_save`] as the last thing it does: that part creates a window or shows a message
+/// box, which must not happen while the window state is in use.
+fn save(hwnd: HWND, ctx: &mut Ctx) -> SaveOutcome {
+    finish_typing(ctx);
+    let doc = ctx.editor.doc();
+    let quality = crate::dispatch::with_app(|a| a.settings.screenshot.jpeg_quality).unwrap_or(90);
+    let outcome = save_annotated(&ctx.image, &doc, &ctx.source, quality);
+    if let SaveOutcome::Saved { path, .. } = &outcome {
+        ctx.saved = doc;
+        tracing::info!("saved annotated screenshot to {}", path.display());
+    }
+    set_status(hwnd, ctx, &outcome.status());
+    outcome
+}
+
+/// Tell the user what a Save did, beyond the title bar: the saved file in the preview panel
+/// (the same flyout a capture ends with, so the cropped, annotated result is visible and Open /
+/// Folder / Copy / Pin are at hand), or the reason it failed.
+///
+/// Takes no window state, and must run after the handler's last use of it: creating the flyout
+/// and showing a message box can both re-enter the window procedure.
+fn report_save(outcome: SaveOutcome) {
+    match outcome {
+        SaveOutcome::Nothing => {}
+        SaveOutcome::Saved { path, image } => {
             crate::history::record(&path, config::history::EntryKind::Annotated);
-            set_status(hwnd, ctx, &format!("saved as {name}"));
+            show_saved_flyout(&path, &image);
         }
-        Err(e) => {
-            tracing::warn!("could not save the annotated screenshot: {e:#}");
-            set_status(hwnd, ctx, "save failed");
+        SaveOutcome::Failed(e) => {
+            crate::notify::error("The annotated screenshot could not be saved.", e)
         }
+    }
+}
+
+/// Show the post-capture flyout for a saved annotated copy, replacing the current one. The app
+/// state is borrowed only to read the dispatch window and, separately, to store the flyout:
+/// never across the window creation in between.
+fn show_saved_flyout(path: &Path, image: &Rgba) {
+    // No app state: the editor was opened outside the tray app, which has no flyout.
+    let Some(dispatch_hwnd) = crate::dispatch::with_app(|a| a.dispatch_hwnd) else {
+        return;
+    };
+    match crate::ui::flyout::Flyout::show(dispatch_hwnd, path, image) {
+        Ok(flyout) => {
+            let previous = crate::dispatch::with_app(|a| a.flyout.replace(flyout)).flatten();
+            // Dropping a flyout destroys its window: outside the borrow as well.
+            drop(previous);
+        }
+        // The file is saved and the title bar says so; only the preview is missing.
+        Err(e) => tracing::warn!("could not show the saved file's preview: {e:#}"),
     }
 }
 
@@ -1343,8 +1422,10 @@ fn confirm_close(hwnd: HWND, dirty: bool) -> bool {
         let Some(ctx) = ctx_of(hwnd) else {
             return true;
         };
-        save(hwnd, ctx);
-        !ctx.dirty() // closes only if the save worked
+        let outcome = save(hwnd, ctx);
+        let saved = !ctx.dirty(); // closes only if the save worked
+        report_save(outcome); // after the last use of `ctx`
+        saved
     } else {
         answer == IDNO
     }
@@ -1811,5 +1892,69 @@ mod tests {
         let second = imaging::save_image_unique(&img, &tdir, &name, 90).unwrap();
         assert_eq!(first, dir.join("shot_annotated.png"));
         assert_eq!(second, dir.join("shot_annotated_2.png"));
+    }
+
+    #[test]
+    fn save_writes_the_cropped_annotated_copy_and_hands_it_back_for_the_preview() {
+        let tmp = TestDir::new("save_ok");
+        let source = tmp.0.join("shot.png");
+        let doc = Doc {
+            items: vec![Item::Rect(Rect::new(10, 10, 40, 30), Style::DEFAULT)],
+            crop: Some(Rect::new(20, 5, 50, 40)),
+        };
+        let outcome = save_annotated(&white(100, 80), &doc, &source, 90);
+        assert_eq!(outcome.status(), "saved as shot_annotated.png");
+        let SaveOutcome::Saved { path, image } = outcome else {
+            panic!("expected a saved file, got {outcome:?}");
+        };
+        assert_eq!(path, tmp.0.join("shot_annotated.png"));
+        // The preview is the saved result: cut to the crop, with the outline in it.
+        assert_eq!((image.width(), image.height()), (50, 40));
+        assert_eq!(px(&image, 10, 6), [255, 0, 0, 255]);
+        assert_eq!(imaging::load_rgba(&path).unwrap(), image);
+        // A second save never overwrites the first.
+        let again = save_annotated(&white(100, 80), &doc, &source, 90);
+        assert_eq!(again.status(), "saved as shot_annotated_2.png");
+    }
+
+    #[test]
+    fn a_crop_alone_is_worth_saving_and_an_empty_document_is_not() {
+        let tmp = TestDir::new("save_crop");
+        let source = tmp.0.join("shot.png");
+        let nothing = save_annotated(&white(40, 30), &Doc::default(), &source, 90);
+        assert!(matches!(nothing, SaveOutcome::Nothing), "{nothing:?}");
+        assert_eq!(nothing.status(), "nothing to save yet");
+        assert!(!tmp.0.join("shot_annotated.png").exists());
+
+        let doc = Doc {
+            items: Vec::new(),
+            crop: Some(Rect::new(5, 5, 20, 10)),
+        };
+        let SaveOutcome::Saved { image, .. } = save_annotated(&white(40, 30), &doc, &source, 90)
+        else {
+            panic!("a crop must be saved");
+        };
+        assert_eq!((image.width(), image.height()), (20, 10));
+    }
+
+    #[test]
+    fn a_failed_save_carries_its_reason() {
+        let tmp = TestDir::new("save_fail");
+        // The "folder" the copy should go into is a file: nothing can be created inside it.
+        let blocker = tmp.0.join("not_a_folder");
+        std::fs::write(&blocker, b"x").unwrap();
+        let doc = Doc {
+            items: vec![Item::BlackBox(Rect::new(2, 2, 10, 10))],
+            crop: None,
+        };
+        let outcome = save_annotated(&white(40, 30), &doc, &blocker.join("shot.png"), 90);
+        assert_eq!(outcome.status(), "save failed");
+        let SaveOutcome::Failed(e) = outcome else {
+            panic!("expected a failure, got {outcome:?}");
+        };
+        assert!(
+            !format!("{e:#}").is_empty(),
+            "the reason is shown to the user"
+        );
     }
 }
