@@ -4,8 +4,8 @@
 //!
 //! All coordinates in the model are **image pixels** (top-left origin).
 //!
-//! Items come in two layers. *Pixel* items ([`Item::Pixelate`], [`Item::Highlight`]) change the
-//! screenshot's pixels themselves ([`apply_pixel_layer`]); the window then draws the *vector*
+//! Items come in two layers. *Pixel* items ([`Item::Pixelate`], [`Item::BlackBox`],
+//! [`Item::Highlight`], [`Item::Spotlight`]) change the screenshot's pixels themselves ([`apply_pixel_layer`]); the window then draws the *vector*
 //! items (outlines, ellipses, lines, arrows, text) on top. Save and Copy export both layers, so a redaction is
 //! part of the file, not an overlay that could be lifted off.
 //!
@@ -24,6 +24,10 @@ pub const PIXELATE_BLOCK: u32 = 12;
 
 /// Highlighter opacity (102/255 = 40 %): the text underneath stays readable.
 pub const HIGHLIGHT_ALPHA: u8 = 102;
+
+/// How dark everything outside the spotlights gets (140/255 = 55 % black): clearly in the
+/// background, still readable as context.
+pub const SPOTLIGHT_ALPHA: u8 = 140;
 
 /// The fixed colour palette.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -152,12 +156,15 @@ pub enum Tool {
     /// Drag a rectangle that is filled solid black in the saved/copied image: the strongest
     /// redaction, for what pixelation could leave recognisable.
     BlackBox,
+    /// Drag a box that stays as it is while everything outside it (and outside every other
+    /// spotlight) is darkened in the saved/copied image.
+    Spotlight,
     /// Click to place the next numbered step marker (①, ②, …).
     Step,
 }
 
 impl Tool {
-    pub const ALL: [Tool; 11] = [
+    pub const ALL: [Tool; 12] = [
         Tool::Select,
         Tool::Crop,
         Tool::Rect,
@@ -168,6 +175,7 @@ impl Tool {
         Tool::Highlight,
         Tool::Pixelate,
         Tool::BlackBox,
+        Tool::Spotlight,
         Tool::Step,
     ];
 
@@ -183,7 +191,8 @@ impl Tool {
             Tool::Highlight => 7,
             Tool::Pixelate => 8,
             Tool::BlackBox => 9,
-            Tool::Step => 10,
+            Tool::Spotlight => 10,
+            Tool::Step => 11,
         }
     }
 
@@ -198,17 +207,18 @@ impl Tool {
         }
     }
 
-    /// Whether the palette applies (a pixelate area has no colour; a black box is always black).
-    /// For Select it depends on the selected item: see [`Editor::color_enabled`].
+    /// Whether the palette applies (a pixelate area has no colour; a black box is always black,
+    /// a spotlight always darkens). For Select it depends on the selected item: see
+    /// [`Editor::color_enabled`].
     pub fn uses_color(self) -> bool {
         !matches!(
             self,
-            Tool::Select | Tool::Crop | Tool::Pixelate | Tool::BlackBox
+            Tool::Select | Tool::Crop | Tool::Pixelate | Tool::BlackBox | Tool::Spotlight
         )
     }
 
-    /// Whether the thickness applies (highlight, pixelate and black box are filled areas; for a
-    /// step marker it sets the size).
+    /// Whether the thickness applies (highlight, pixelate, black box and spotlight are areas;
+    /// for a step marker it sets the size).
     pub fn uses_thickness(self) -> bool {
         matches!(
             self,
@@ -247,6 +257,9 @@ pub enum Item {
     Pixelate(Rect),
     /// A redacted area filled solid black by [`apply_pixel_layer`].
     BlackBox(Rect),
+    /// An area to draw the eye to: [`apply_pixel_layer`] darkens everything that is outside
+    /// every spotlight ([`spotlight_keep`] is the area one keeps).
+    Spotlight(Rect),
     /// A numbered circle centred on `at`, filled with the style's colour; the thickness sets
     /// its size ([`Thickness::step_diameter`]).
     Step {
@@ -261,12 +274,12 @@ impl Item {
     pub fn is_pixel(&self) -> bool {
         matches!(
             self,
-            Item::Highlight(..) | Item::Pixelate(_) | Item::BlackBox(_)
+            Item::Highlight(..) | Item::Pixelate(_) | Item::BlackBox(_) | Item::Spotlight(_)
         )
     }
 
     /// The item's style, for the toolbar while it is selected. A highlight reports its colour
-    /// (its line is unused); pixelate and black box have none.
+    /// (its line is unused); pixelate, black box and spotlight have none.
     pub fn style(&self) -> Option<Style> {
         match self {
             Item::Rect(_, style)
@@ -279,7 +292,7 @@ impl Item {
                 color: *color,
                 ..Style::DEFAULT
             }),
-            Item::Pixelate(_) | Item::BlackBox(_) => None,
+            Item::Pixelate(_) | Item::BlackBox(_) | Item::Spotlight(_) => None,
         }
     }
 
@@ -310,7 +323,7 @@ impl Item {
             | Item::Line { style, .. }
             | Item::Step { style, .. } => style.color = color,
             Item::Highlight(_, c) => *c = color,
-            Item::Pixelate(_) | Item::BlackBox(_) => {}
+            Item::Pixelate(_) | Item::BlackBox(_) | Item::Spotlight(_) => {}
         }
         item
     }
@@ -351,7 +364,8 @@ impl Item {
             | Item::Text { rect: r, .. }
             | Item::Highlight(r, _)
             | Item::Pixelate(r)
-            | Item::BlackBox(r) => *r,
+            | Item::BlackBox(r)
+            | Item::Spotlight(r) => *r,
             Item::Arrow { from, to, .. } | Item::Line { from, to, .. } => {
                 Rect::from_points(*from, *to)
             }
@@ -367,7 +381,8 @@ impl Item {
             | Item::Text { rect: r, .. }
             | Item::Highlight(r, _)
             | Item::Pixelate(r)
-            | Item::BlackBox(r) => Some(*r),
+            | Item::BlackBox(r)
+            | Item::Spotlight(r) => Some(*r),
             Item::Arrow { .. } | Item::Line { .. } | Item::Step { .. } => None,
         }
     }
@@ -388,7 +403,8 @@ impl Item {
         | Item::Text { rect: r, .. }
         | Item::Highlight(r, _)
         | Item::Pixelate(r)
-        | Item::BlackBox(r) = &mut item
+        | Item::BlackBox(r)
+        | Item::Spotlight(r) = &mut item
         {
             *r = new;
         }
@@ -441,6 +457,7 @@ impl Item {
             Item::Highlight(r, color) => Item::Highlight(mv(r), *color),
             Item::Pixelate(r) => Item::Pixelate(mv(r)),
             Item::BlackBox(r) => Item::BlackBox(mv(r)),
+            Item::Spotlight(r) => Item::Spotlight(mv(r)),
             Item::Step { at, number, style } => Item::Step {
                 at: mp(at),
                 number: *number,
@@ -451,14 +468,19 @@ impl Item {
 
     /// Whether a click at `p` picks this item, allowing `slop` image pixels of slack. Filled
     /// items and text boxes are picked anywhere inside; a rectangle or ellipse outline only near
-    /// its edge (so whatever is inside it can still be clicked); an arrow near its shaft or
-    /// head; a line near the line.
+    /// its edge (so whatever is inside it can still be clicked), and so is a spotlight, whose
+    /// inside is the untouched screenshot; an arrow near its shaft or head; a line near the
+    /// line.
     pub fn hit(&self, p: Point, slop: i32) -> bool {
         let grow =
             |r: &Rect, d: i32| Rect::new(r.x - d, r.y - d, r.width + 2 * d, r.height + 2 * d);
         match self {
             Item::Rect(r, style) => {
                 let inner = grow(r, -(style.thickness.px() + slop));
+                grow(r, slop).contains(p) && (inner.is_empty() || !inner.contains(p))
+            }
+            Item::Spotlight(r) => {
+                let inner = grow(r, -slop);
                 grow(r, slop).contains(p) && (inner.is_empty() || !inner.contains(p))
             }
             Item::Ellipse(r, style) => {
@@ -692,8 +714,9 @@ pub enum Shortcut {
     Thicker,
 }
 
-/// The shortcut for a typed character: `S` `C` `R` `E` `T` `A` `L` `H` `P` `B` `N` pick a tool,
-/// `1`–`6` a colour, `[` / `]` step the thickness. Case-insensitive. Characters (not key codes) are matched, so
+/// The shortcut for a typed character: `S` `C` `R` `E` `T` `A` `L` `H` `P` `B` `F` `N` pick a
+/// tool (`F` for "focus" is the spotlight: `S` is Select), `1`–`6` a colour, `[` / `]` step the
+/// thickness. Case-insensitive. Characters (not key codes) are matched, so
 /// the keys work the same on any keyboard layout.
 pub fn shortcut(c: char) -> Option<Shortcut> {
     Some(match c.to_ascii_lowercase() {
@@ -707,6 +730,7 @@ pub fn shortcut(c: char) -> Option<Shortcut> {
         'h' => Shortcut::Tool(Tool::Highlight),
         'p' => Shortcut::Tool(Tool::Pixelate),
         'b' => Shortcut::Tool(Tool::BlackBox),
+        'f' => Shortcut::Tool(Tool::Spotlight),
         'n' => Shortcut::Tool(Tool::Step),
         '[' => Shortcut::Thinner,
         ']' => Shortcut::Thicker,
@@ -1028,6 +1052,7 @@ impl Editor {
             Tool::Highlight => Item::Highlight(r, style.color),
             Tool::Pixelate => Item::Pixelate(r),
             Tool::BlackBox => Item::BlackBox(r),
+            Tool::Spotlight => Item::Spotlight(r),
             Tool::Step => Item::Step {
                 at: b,
                 number: self.next_step_number(),
@@ -1128,6 +1153,49 @@ impl Editor {
         self.moving.as_ref().map(|m| m.index)
     }
 
+    /// The pixel items the canvas shows baked into its pixels right now: all of them, except
+    /// the one being dragged (moved or resized) by the Select tool — and, while any spotlight is
+    /// being drawn or dragged, every spotlight. What is left out is drawn live instead (see
+    /// [`Editor::preview`] and [`Editor::live_spotlights`]), so a drag rebuilds the canvas once
+    /// when it starts and once when it ends, not on every mouse move.
+    pub fn canvas_pixels(&self) -> Vec<Item> {
+        let moving = self.moving_index();
+        let live = self.spotlight_in_hand();
+        self.items
+            .iter()
+            .enumerate()
+            .filter(|&(i, item)| {
+                item.is_pixel()
+                    && Some(i) != moving
+                    && !(live && matches!(item, Item::Spotlight(_)))
+            })
+            .map(|(_, item)| item.clone())
+            .collect()
+    }
+
+    /// While a spotlight is being drawn, moved or resized: the areas to keep bright (those of
+    /// all spotlights, with the one in hand where it is now), for the window to darken the rest
+    /// live. Darkening cannot be undone on screen, so the committed spotlights are redrawn this
+    /// way too (they are left out of [`Editor::canvas_pixels`] meanwhile). `None` otherwise.
+    pub fn live_spotlights(&self) -> Option<Vec<Rect>> {
+        if !self.spotlight_in_hand() {
+            return None;
+        }
+        let drawn = match self.preview() {
+            Some(Item::Spotlight(r)) => Some(spotlight_keep(r)),
+            _ => None,
+        };
+        Some(spotlight_areas(&self.items).chain(drawn).collect())
+    }
+
+    fn spotlight_in_hand(&self) -> bool {
+        (self.tool == Tool::Spotlight && self.drag.is_some())
+            || self
+                .moving
+                .as_ref()
+                .is_some_and(|m| matches!(m.original, Item::Spotlight(_)))
+    }
+
     /// True while the mouse button is down on something being drawn or moved.
     pub fn is_dragging(&self) -> bool {
         self.drag.is_some() || self.moving.is_some()
@@ -1210,6 +1278,7 @@ impl Editor {
             Tool::Highlight => self.push(Item::Highlight(r, style.color)),
             Tool::Pixelate => self.push(Item::Pixelate(r)),
             Tool::BlackBox => self.push(Item::BlackBox(r)),
+            Tool::Spotlight => self.push(Item::Spotlight(r)),
             Tool::Arrow | Tool::Line | Tool::Select | Tool::Step | Tool::Crop => {} // handled above
             Tool::Text => {
                 self.typing = Some(Typing {
@@ -1389,9 +1458,29 @@ impl Editor {
     }
 }
 
+/// The area a spotlight keeps as it is: its box with both corner pixels included (like a
+/// crop), so a spotlight dragged into a corner of the image leaves no darkened line of pixels
+/// along the edge.
+pub fn spotlight_keep(r: Rect) -> Rect {
+    Rect::new(r.x, r.y, r.width + 1, r.height + 1)
+}
+
+/// The kept areas of every spotlight in `items`.
+fn spotlight_areas(items: &[Item]) -> impl Iterator<Item = Rect> + '_ {
+    items.iter().filter_map(|item| match item {
+        Item::Spotlight(r) => Some(spotlight_keep(*r)),
+        _ => None,
+    })
+}
+
 /// The screenshot with the pixel items of `items` applied in order (a pixelate drawn over a
 /// highlight pixelates the highlight too, and the other way round). Vector items are ignored:
 /// the window draws them on top. Pure, so what Save and Copy export is unit-tested here.
+///
+/// Spotlights are the exception to "in order": together they darken, once and last, everything
+/// outside the union of their areas (by [`SPOTLIGHT_ALPHA`]). Two spotlights therefore never
+/// make the background darker than one, and a highlight or redaction outside them is dimmed
+/// like the rest of the background whenever it was drawn.
 pub fn apply_pixel_layer(img: &Rgba, items: &[Item]) -> Rgba {
     let mut out = img.clone();
     for item in items {
@@ -1401,6 +1490,8 @@ pub fn apply_pixel_layer(img: &Rgba, items: &[Item]) -> Rgba {
             Item::Highlight(r, color) => {
                 imaging::blend_rect_in_place(&mut out, *r, color.rgb(), HIGHLIGHT_ALPHA)
             }
+            // Applied together below.
+            Item::Spotlight(_) => {}
             Item::Rect(..)
             | Item::Ellipse(..)
             | Item::Text { .. }
@@ -1408,6 +1499,10 @@ pub fn apply_pixel_layer(img: &Rgba, items: &[Item]) -> Rgba {
             | Item::Line { .. }
             | Item::Step { .. } => {}
         }
+    }
+    let keep: Vec<Rect> = spotlight_areas(items).collect();
+    if !keep.is_empty() {
+        imaging::dim_outside_in_place(&mut out, &keep, SPOTLIGHT_ALPHA);
     }
     out
 }
@@ -2108,10 +2203,13 @@ mod tests {
         for tool in Tool::ALL.into_iter().filter(|t| *t != Tool::Select) {
             let lineless = matches!(
                 tool,
-                Tool::Crop | Tool::Highlight | Tool::Pixelate | Tool::BlackBox
+                Tool::Crop | Tool::Highlight | Tool::Pixelate | Tool::BlackBox | Tool::Spotlight
             );
             assert_eq!(tool.uses_thickness(), !lineless, "{tool:?}");
-            let colourless = matches!(tool, Tool::Crop | Tool::Pixelate | Tool::BlackBox);
+            let colourless = matches!(
+                tool,
+                Tool::Crop | Tool::Pixelate | Tool::BlackBox | Tool::Spotlight
+            );
             assert_eq!(tool.uses_color(), !colourless, "{tool:?}");
         }
     }
@@ -3418,7 +3516,7 @@ mod tests {
             assert!(e.color_enabled() && e.thickness_enabled());
         }
         // Every tool key is its own.
-        let keys = ['s', 'c', 'r', 'e', 't', 'a', 'l', 'h', 'p', 'b', 'n'];
+        let keys = ['s', 'c', 'r', 'e', 't', 'a', 'l', 'h', 'p', 'b', 'f', 'n'];
         let mut tools: Vec<Tool> = Vec::new();
         for k in keys {
             let Some(Shortcut::Tool(t)) = shortcut(k) else {
@@ -3679,5 +3777,274 @@ mod tests {
             },
         ];
         assert_eq!(apply_pixel_layer(&src, &items), src);
+    }
+
+    /// A flat mid-grey image and the value its pixels have once darkened by a spotlight.
+    fn flat_grey(w: u32, h: u32) -> (Rgba, [u8; 4]) {
+        let img = Rgba::from_raw(w, h, [200, 200, 200, 255].repeat((w * h) as usize)).unwrap();
+        let a = u32::from(SPOTLIGHT_ALPHA);
+        let dim = ((200 * (255 - a) + 127) / 255) as u8;
+        (img, [dim, dim, dim, 255])
+    }
+
+    #[test]
+    fn spotlight_tool_key_and_style() {
+        assert_eq!(shortcut('f'), Some(Shortcut::Tool(Tool::Spotlight)));
+        assert_eq!(shortcut('F'), Some(Shortcut::Tool(Tool::Spotlight)));
+        assert_eq!(
+            shortcut('s'),
+            Some(Shortcut::Tool(Tool::Select)),
+            "S stays Select"
+        );
+        let mut e = Editor::new(200, 100);
+        assert!(e.apply_shortcut(Shortcut::Tool(Tool::Spotlight)));
+        assert_eq!(e.tool(), Tool::Spotlight);
+        assert!(!e.color_enabled(), "no colour: the swatches are greyed");
+        assert!(!e.thickness_enabled(), "no line");
+        assert!(Item::Spotlight(Rect::new(0, 0, 9, 9)).is_pixel());
+        assert_eq!(Item::Spotlight(Rect::new(0, 0, 9, 9)).style(), None);
+    }
+
+    #[test]
+    fn spotlight_tool_commits_a_normalized_clamped_box_with_the_min_size_rule() {
+        let mut e = Editor::new(200, 100);
+        e.set_tool(Tool::Spotlight);
+        drag(&mut e, (10, 10), (80, 10 + MIN_SIZE - 1)); // too flat
+        assert!(e.items().is_empty());
+        e.on_down(Point::new(150, 90));
+        e.on_move(Point::new(60, 40));
+        assert_eq!(
+            e.preview(),
+            Some(Item::Spotlight(Rect::new(60, 40, 90, 50)))
+        );
+        e.on_up(Point::new(-20, 30));
+        assert_eq!(e.items(), &[Item::Spotlight(Rect::new(0, 30, 150, 60))]);
+        assert!(e.undo());
+        assert!(e.items().is_empty());
+        assert!(e.redo());
+        assert_eq!(e.items().len(), 1);
+    }
+
+    #[test]
+    fn spotlight_darkens_everything_outside_its_box_and_nothing_inside() {
+        let (src, dim) = flat_grey(60, 40);
+        let kept = [200, 200, 200, 255];
+        let out = apply_pixel_layer(&src, &[Item::Spotlight(Rect::new(10, 10, 20, 15))]);
+        for y in 0..40 {
+            for x in 0..60 {
+                // Both corner pixels belong to the box, like a crop.
+                let inside = (10..=30).contains(&x) && (10..=25).contains(&y);
+                let want = if inside { kept } else { dim };
+                assert_eq!(out.get_pixel(x, y).0, want, "({x},{y})");
+            }
+        }
+        // Dragged from corner to corner of the image, nothing is darkened at all.
+        let mut e = Editor::new(60, 40);
+        e.set_tool(Tool::Spotlight);
+        drag(&mut e, (0, 0), (59, 39));
+        assert_eq!(apply_pixel_layer(&src, e.items()), src);
+        // Translucent: the detail outside is still there.
+        let detail = apply_pixel_layer(
+            &detailed(60, 40),
+            &[Item::Spotlight(Rect::new(10, 10, 20, 15))],
+        );
+        assert_ne!(detail.get_pixel(40, 30), detail.get_pixel(41, 30));
+    }
+
+    #[test]
+    fn several_spotlights_darken_once_outside_their_union() {
+        let (src, dim) = flat_grey(80, 50);
+        let kept = [200, 200, 200, 255];
+        let (a, b) = (Rect::new(5, 5, 30, 20), Rect::new(25, 15, 40, 25)); // overlapping
+        let both = apply_pixel_layer(&src, &[Item::Spotlight(a), Item::Spotlight(b)]);
+        assert_eq!(both.get_pixel(8, 8).0, kept, "in the first only");
+        assert_eq!(both.get_pixel(60, 35).0, kept, "in the second only");
+        assert_eq!(both.get_pixel(30, 20).0, kept, "in both");
+        assert_eq!(both.get_pixel(75, 5).0, dim, "outside both: darkened once");
+        assert_eq!(both.get_pixel(8, 35).0, dim);
+        assert!(
+            both.pixels().all(|p| p.0 == kept || p.0 == dim),
+            "no pixel is darkened twice"
+        );
+        // A third one, apart from the others, still does not deepen the background.
+        let three = apply_pixel_layer(
+            &src,
+            &[
+                Item::Spotlight(a),
+                Item::Spotlight(b),
+                Item::Spotlight(Rect::new(70, 40, 8, 8)),
+            ],
+        );
+        assert_eq!(three.get_pixel(75, 5).0, dim);
+        assert_eq!(three.get_pixel(74, 44).0, kept);
+        // The order they were drawn in does not matter.
+        assert_eq!(
+            apply_pixel_layer(&src, &[Item::Spotlight(b), Item::Spotlight(a)]),
+            both
+        );
+    }
+
+    #[test]
+    fn spotlights_dim_the_other_pixel_items_outside_them_whatever_the_order() {
+        let (src, dim) = flat_grey(80, 50);
+        let spot = Item::Spotlight(Rect::new(40, 5, 30, 40));
+        let highlight = Item::Highlight(Rect::new(5, 5, 20, 20), Color::Yellow);
+        let inside_box = Item::BlackBox(Rect::new(50, 10, 10, 10));
+        let first = apply_pixel_layer(&src, &[spot.clone(), highlight.clone(), inside_box.clone()]);
+        let last = apply_pixel_layer(&src, &[highlight.clone(), inside_box.clone(), spot.clone()]);
+        assert_eq!(first, last, "the darkening always comes last");
+        // The highlight outside the spotlight is dimmed with the background (not left bright)...
+        let lit = apply_pixel_layer(&src, &[highlight]);
+        assert_ne!(first.get_pixel(10, 10), lit.get_pixel(10, 10));
+        assert_ne!(
+            first.get_pixel(10, 10).0,
+            dim,
+            "but it is still a highlight"
+        );
+        // ...and what is inside the spotlight is exactly as without it.
+        assert_eq!(first.get_pixel(55, 15).0, [0, 0, 0, 255]);
+        assert_eq!(first.get_pixel(45, 30).0, [200, 200, 200, 255]);
+        // Vector items never take part.
+        let with_vectors = apply_pixel_layer(
+            &src,
+            &[
+                Item::Rect(Rect::new(1, 1, 30, 30), Style::DEFAULT),
+                spot.clone(),
+            ],
+        );
+        assert_eq!(with_vectors, apply_pixel_layer(&src, &[spot]));
+    }
+
+    #[test]
+    fn a_spotlight_is_picked_by_its_edge_so_what_it_frames_stays_clickable() {
+        let mut e = Editor::new(200, 100);
+        e.set_tool(Tool::BlackBox);
+        drag(&mut e, (60, 30), (90, 60)); // index 0
+        e.set_tool(Tool::Spotlight);
+        drag(&mut e, (40, 20), (160, 80)); // index 1, drawn later, around the box
+        e.set_tool(Tool::Select);
+        e.set_hit_slop(3);
+        assert_eq!(e.hit_test(Point::new(75, 45)), Some(0), "the box inside it");
+        assert_eq!(
+            e.hit_test(Point::new(120, 50)),
+            None,
+            "its untouched inside"
+        );
+        assert_eq!(e.hit_test(Point::new(40, 50)), Some(1), "its left edge");
+        assert_eq!(
+            e.hit_test(Point::new(100, 82)),
+            Some(1),
+            "just below the bottom edge"
+        );
+        assert_eq!(e.hit_test(Point::new(100, 86)), None);
+        // Selected: no colour, no line; Delete removes it.
+        click(&mut e, 40, 50);
+        assert!(!e.color_enabled() && !e.thickness_enabled());
+        e.set_color(Color::Blue);
+        assert_eq!(e.items()[1], Item::Spotlight(Rect::new(40, 20, 120, 60)));
+        assert!(e.delete_selected());
+        assert_eq!(e.items(), &[Item::BlackBox(Rect::new(60, 30, 30, 30))]);
+        assert!(e.undo());
+        assert_eq!(e.items().len(), 2);
+    }
+
+    #[test]
+    fn a_spotlight_moves_and_resizes_like_a_box() {
+        let mut e = selected_item(Tool::Spotlight, (40, 20), (120, 70), (80, 20));
+        assert_eq!(e.handles().len(), 8);
+        e.on_down(Point::new(100, 20)); // the top edge, between the handles: a move
+        e.on_up(Point::new(110, 500));
+        assert_eq!(e.items()[0], Item::Spotlight(Rect::new(50, 49, 80, 50)));
+        e.on_down(Point::new(130, 99)); // bottom-right handle
+        e.on_up(Point::new(150, 80));
+        assert_eq!(e.items()[0], Item::Spotlight(Rect::new(50, 49, 100, 31)));
+        e.on_down(Point::new(50, 49)); // top-left handle, dragged past the opposite corner
+        e.on_up(Point::new(190, 95));
+        assert_eq!(e.items()[0], Item::Spotlight(Rect::new(150, 80, 40, 15)));
+        assert!(e.undo() && e.undo() && e.undo());
+        assert_eq!(e.items()[0], Item::Spotlight(Rect::new(40, 20, 80, 50)));
+    }
+
+    #[test]
+    fn the_canvas_leaves_out_what_is_being_dragged() {
+        let mut e = Editor::new(200, 100);
+        e.set_tool(Tool::Highlight);
+        drag(&mut e, (10, 10), (50, 40));
+        e.set_tool(Tool::BlackBox);
+        drag(&mut e, (100, 10), (140, 40));
+        e.set_tool(Tool::Rect);
+        drag(&mut e, (150, 50), (190, 90));
+        let highlight = Item::Highlight(Rect::new(10, 10, 40, 30), Color::Yellow);
+        let black = Item::BlackBox(Rect::new(100, 10, 40, 30));
+        // Idle: every pixel item, no vector item.
+        assert_eq!(e.canvas_pixels(), vec![highlight.clone(), black.clone()]);
+        assert_eq!(e.live_spotlights(), None);
+        // Moving or resizing a pixel item: that one is drawn as a preview instead.
+        e.set_tool(Tool::Select);
+        e.on_down(Point::new(120, 25));
+        assert_eq!(e.canvas_pixels(), vec![highlight.clone()]);
+        e.on_move(Point::new(125, 30));
+        assert_eq!(e.canvas_pixels(), vec![highlight.clone()]);
+        e.on_up(Point::new(120, 25));
+        assert_eq!(e.canvas_pixels(), vec![highlight.clone(), black.clone()]);
+        e.on_down(Point::new(100, 10)); // its corner handle: a resize
+        assert_eq!(e.moving_index(), Some(1));
+        assert_eq!(e.canvas_pixels(), vec![highlight.clone()]);
+        e.on_escape();
+        // Drawing a new pixel item: the committed ones stay.
+        e.set_tool(Tool::Pixelate);
+        e.on_down(Point::new(60, 60));
+        e.on_move(Point::new(90, 90));
+        assert_eq!(e.canvas_pixels(), vec![highlight, black]);
+    }
+
+    #[test]
+    fn spotlights_are_shown_live_while_one_is_drawn_or_dragged() {
+        let mut e = Editor::new(200, 100);
+        e.set_tool(Tool::Highlight);
+        drag(&mut e, (10, 60), (50, 90));
+        e.set_tool(Tool::Spotlight);
+        drag(&mut e, (10, 10), (60, 40));
+        let highlight = Item::Highlight(Rect::new(10, 60, 40, 30), Color::Yellow);
+        let first = Item::Spotlight(Rect::new(10, 10, 50, 30));
+        assert_eq!(e.canvas_pixels(), vec![highlight.clone(), first.clone()]);
+        assert_eq!(e.live_spotlights(), None, "idle: baked into the canvas");
+
+        // Drawing a second one: all spotlights leave the canvas and are darkened live as a
+        // union with the box being dragged (both corner pixels kept, like the export).
+        e.on_down(Point::new(100, 20));
+        e.on_move(Point::new(150, 70));
+        assert_eq!(e.canvas_pixels(), vec![highlight.clone()]);
+        assert_eq!(
+            e.live_spotlights(),
+            Some(vec![Rect::new(10, 10, 51, 31), Rect::new(100, 20, 51, 51)])
+        );
+        e.on_up(Point::new(150, 70));
+        let second = Item::Spotlight(Rect::new(100, 20, 50, 50));
+        assert_eq!(e.live_spotlights(), None);
+        assert_eq!(
+            e.canvas_pixels(),
+            vec![highlight.clone(), first.clone(), second.clone()]
+        );
+
+        // Moving one: the same, with the moved box where it is now.
+        e.set_tool(Tool::Select);
+        e.on_down(Point::new(10, 25));
+        e.on_move(Point::new(20, 35));
+        assert_eq!(e.canvas_pixels(), vec![highlight.clone()]);
+        assert_eq!(
+            e.live_spotlights(),
+            Some(vec![Rect::new(20, 20, 51, 31), Rect::new(100, 20, 51, 51)])
+        );
+        e.on_escape();
+        assert_eq!(e.live_spotlights(), None);
+        assert_eq!(e.canvas_pixels(), vec![highlight.clone(), first, second]);
+
+        // Dragging something else leaves the spotlights baked in.
+        click(&mut e, 30, 75);
+        e.on_down(Point::new(30, 75));
+        e.on_move(Point::new(40, 75));
+        assert_eq!(e.live_spotlights(), None);
+        assert_eq!(e.canvas_pixels().len(), 2);
     }
 }

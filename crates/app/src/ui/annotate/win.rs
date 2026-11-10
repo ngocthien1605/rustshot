@@ -4,7 +4,7 @@
 //! flyout), so it needs no thread of its own.
 //!
 //! What you see is what gets saved: the canvas shows the screenshot with the pixel items
-//! (highlight, pixelate) applied by the same [`apply_pixel_layer`] the export uses, and one GDI
+//! (highlight, pixelate, black box, spotlight) applied by the same [`apply_pixel_layer`] the export uses, and one GDI
 //! routine ([`paint_items`]) draws the outlines, ellipses, lines, arrows and text both on screen
 //! and into the exported image.
 
@@ -46,10 +46,10 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WM_SIZE, WM_SYSKEYDOWN, WNDCLASSW, WS_CHILD, WS_OVERLAPPEDWINDOW, WS_VISIBLE,
 };
 
-use windows::Win32::Graphics::Gdi::WHITE_BRUSH;
 use windows::Win32::Graphics::Gdi::{
     Ellipse, ScreenToClient, DT_CENTER, DT_SINGLELINE, DT_VCENTER,
 };
+use windows::Win32::Graphics::Gdi::{ExcludeClipRect, WHITE_BRUSH};
 use windows::Win32::UI::Input::KeyboardAndMouse::VK_DELETE;
 use windows::Win32::UI::WindowsAndMessaging::{
     GetCursorPos, SetCursor, HTCLIENT, IDC_ARROW, IDC_SIZEALL, IDC_SIZENESW, IDC_SIZENS,
@@ -61,15 +61,15 @@ use crate::platform::gdi::{ScreenDc, Surface};
 use super::model::{
     apply_pixel_layer, arrow_geometry, enter_action, font_px, shortcut, Color, Doc, Editor,
     EnterAction, EscapeResult, Item, ResizeCursor, Style, Thickness, Tool, Typing, View,
-    HIGHLIGHT_ALPHA,
+    HIGHLIGHT_ALPHA, SPOTLIGHT_ALPHA,
 };
 
 const CLASS_NAME: PCWSTR = w!("RustShotAnnotate");
 static REGISTER: Once = Once::new();
 
 /// The toolbar has two rows of buttons: the tools, then the style and the actions. One row of
-/// everything was 1060 px wide at 96 DPI before Ellipse and Line were added — more than a
-/// 1366-px laptop screen at 125 % can show.
+/// everything was 1060 px wide at 96 DPI before Ellipse, Line and Spotlight were added — with
+/// them, more than a 1366-px laptop screen at 125 % can show.
 const ROWS: i32 = 2;
 /// Height of a toolbar button and the gap above each row (and below the last), at 96 DPI.
 const ROW_H: i32 = 28;
@@ -89,7 +89,7 @@ const CROP_SHADE_ALPHA: u8 = 150;
 /// radio buttons (their ids must stay consecutive, in [`Tool::ALL`] order); the swatches and
 /// thickness buttons are owner-drawn (`WM_DRAWITEM`), their labels only name them for screen
 /// readers.
-const BUTTONS: [(i32, PCWSTR, i32, i32, u32, i32); 24] = [
+const BUTTONS: [(i32, PCWSTR, i32, i32, u32, i32); 25] = [
     (ID_TOOL0, w!("Select"), 8, 50, TOOL | WS_GROUP, 0),
     (ID_TOOL0 + 1, w!("Crop"), 4, 44, TOOL, 0),
     (ID_TOOL0 + 2, w!("Rectangle"), 4, 72, TOOL, 0),
@@ -100,7 +100,8 @@ const BUTTONS: [(i32, PCWSTR, i32, i32, u32, i32); 24] = [
     (ID_TOOL0 + 7, w!("Highlight"), 4, 64, TOOL, 0),
     (ID_TOOL0 + 8, w!("Pixelate"), 4, 60, TOOL, 0),
     (ID_TOOL0 + 9, w!("Black box"), 4, 66, TOOL, 0),
-    (ID_TOOL0 + 10, w!("Step"), 4, 44, TOOL, 0),
+    (ID_TOOL0 + 10, w!("Spotlight"), 4, 68, TOOL, 0),
+    (ID_TOOL0 + 11, w!("Step"), 4, 44, TOOL, 0),
     (ID_COLOR0, w!("Red"), 8, 26, BS_OWNERDRAW, 1),
     (ID_COLOR0 + 1, w!("Yellow"), 2, 26, BS_OWNERDRAW, 1),
     (ID_COLOR0 + 2, w!("Green"), 2, 26, BS_OWNERDRAW, 1),
@@ -874,21 +875,13 @@ fn redraw(hwnd: HWND) {
     }
 }
 
-/// Rebuild the canvas source when the pixel items changed (a highlight or redaction drawn,
-/// moved, undone or redone), so the screen shows the pixels the export will contain. A pixel
-/// item being dragged by the Select tool — moved or resized — is left out (and drawn as a
-/// preview instead), so the drag costs one rebuild at its start and one at its end, not one per
-/// mouse move.
+/// Rebuild the canvas source when the pixel items changed (a highlight, redaction or spotlight
+/// drawn, moved, undone or redone), so the screen shows the pixels the export will contain.
+/// What is being dragged is left out and drawn live instead ([`Editor::canvas_pixels`]): a pixel
+/// item moved or resized by the Select tool, and every spotlight while one is drawn or dragged.
+/// A drag so costs one rebuild at its start and one at its end, not one per mouse move.
 fn sync_source(ctx: &mut Ctx) {
-    let moving = ctx.editor.moving_index();
-    let pixels: Vec<Item> = ctx
-        .editor
-        .items()
-        .iter()
-        .enumerate()
-        .filter(|&(i, item)| item.is_pixel() && Some(i) != moving)
-        .map(|(_, item)| item.clone())
-        .collect();
+    let pixels = ctx.editor.canvas_pixels();
     if pixels == ctx.src_pixels {
         return;
     }
@@ -944,6 +937,11 @@ fn paint(hwnd: HWND, ctx: &mut Ctx) {
         // Keep annotations inside the picture while previewing.
         let saved = SaveDC(back);
         IntersectClipRect(back, v.ox, v.oy, v.ox + v.px(iw), v.oy + v.px(ih));
+        // Spotlights in hand: darken outside all of them live, under the vector items, as the
+        // pixel layer will.
+        if let Some(keep) = ctx.editor.live_spotlights() {
+            dim_outside(back, &keep, v, view_rect(v, Rect::new(0, 0, iw, ih)));
+        }
         // The shape being drawn, or a pixel item being moved or resized (left out of `src`
         // meanwhile).
         let preview = ctx.editor.preview().or_else(|| {
@@ -1041,13 +1039,13 @@ fn paint_item(hdc: HDC, item: &Item, view: View) {
         }
         Item::Arrow { from, to, style } => draw_arrow(hdc, *from, *to, *style, view),
         Item::Step { at, number, style } => draw_step(hdc, *at, *number, *style, view),
-        Item::Highlight(..) | Item::Pixelate(_) | Item::BlackBox(_) => {}
+        Item::Highlight(..) | Item::Pixelate(_) | Item::BlackBox(_) | Item::Spotlight(_) => {}
     }
 }
 
 /// The shape being dragged. Pixel items are only applied to the pixels on release, so until
-/// then a highlight is shown by a GDI alpha blend at the same opacity and a pixelate area by a
-/// dotted frame.
+/// then a highlight is shown by a GDI alpha blend at the same opacity, and a pixelate area or a
+/// spotlight by a dotted frame (the darkening around a spotlight is [`dim_outside`]).
 fn paint_preview(hdc: HDC, item: &Item, view: View) {
     match item {
         Item::Highlight(r, color) => alpha_fill(hdc, *r, *color, view),
@@ -1059,7 +1057,7 @@ fn paint_preview(hdc: HDC, item: &Item, view: View) {
                 FillRect(hdc, &vr, HBRUSH(GetStockObject(BLACK_BRUSH).0));
             }
         }
-        Item::Pixelate(r) => {
+        Item::Pixelate(r) | Item::Spotlight(r) => {
             let vr = view_rect(view, *r);
             // SAFETY: draws a dotted (XOR) frame on the DC we are given.
             unsafe {
@@ -1101,6 +1099,23 @@ fn shade_outside(hdc: HDC, keep: RECT, image: RECT) {
     // SAFETY: draws a dotted (XOR) frame on the DC we are given.
     unsafe {
         let _ = DrawFocusRect(hdc, &keep);
+    }
+}
+
+/// Darken `image` (device px) outside every rectangle of `keep` (image px), once: the live
+/// picture of what [`imaging::dim_outside`] does to the pixels when the spotlights are applied.
+/// One blend over the image with the kept areas cut out of the clip region, so overlapping
+/// areas are not darkened twice here either.
+fn dim_outside(hdc: HDC, keep: &[Rect], view: View, image: RECT) {
+    // SAFETY: narrows the clip region of the DC we are given and restores it before returning.
+    unsafe {
+        let saved = SaveDC(hdc);
+        for r in keep {
+            let vr = view_rect(view, *r);
+            ExcludeClipRect(hdc, vr.left, vr.top, vr.right, vr.bottom);
+        }
+        blend_fill(hdc, image, [0, 0, 0], SPOTLIGHT_ALPHA);
+        let _ = RestoreDC(hdc, saved);
     }
 }
 
@@ -1357,7 +1372,7 @@ fn make_source_dc(img: &Rgba) -> Result<Surface> {
 }
 
 /// Render `items` onto a copy of `img` at full resolution (what Save/Copy produce): the pixel
-/// items (pixelate) change the pixels first, then the outlines and text are drawn on top. The
+/// items (highlight, pixelate, black box, spotlight) change the pixels first, then the outlines and text are drawn on top. The
 /// redacted pixels are what gets encoded — the original detail is not in the output at all.
 pub fn render(img: &Rgba, items: &[Item]) -> Result<Rgba> {
     let surface = make_source_dc(&apply_pixel_layer(img, items))?;
@@ -2238,5 +2253,95 @@ mod tests {
             "the line, at the crop's left edge"
         );
         assert_eq!(px(&out, 49, 55), [255, 0, 0, 255], "and at its right edge");
+    }
+
+    /// What a mid-grey (128) pixel becomes outside a spotlight.
+    fn dimmed_grey() -> [u8; 4] {
+        let a = u32::from(SPOTLIGHT_ALPHA);
+        let v = ((128 * (255 - a) + 127) / 255) as u8;
+        [v, v, v, 255]
+    }
+
+    #[test]
+    fn spotlight_darkens_the_exported_pixels_outside_its_box() {
+        let out = render(&grey(60, 40), &[Item::Spotlight(Rect::new(10, 10, 20, 15))]).unwrap();
+        let (kept, dim) = ([128, 128, 128, 255], dimmed_grey());
+        assert_eq!(dim, [58, 58, 58, 255], "128 at 45 % brightness");
+        for y in 0..40 {
+            for x in 0..60 {
+                let inside = (10..=30).contains(&x) && (10..=25).contains(&y);
+                assert_eq!(px(&out, x, y), if inside { kept } else { dim }, "({x},{y})");
+            }
+        }
+    }
+
+    #[test]
+    fn two_spotlights_do_not_darken_the_exported_background_twice() {
+        let items = [
+            Item::Spotlight(Rect::new(5, 5, 20, 15)),
+            Item::Spotlight(Rect::new(15, 10, 30, 20)),
+        ];
+        let out = render(&grey(60, 40), &items).unwrap();
+        let (kept, dim) = ([128, 128, 128, 255], dimmed_grey());
+        assert_eq!(px(&out, 8, 8), kept, "first only");
+        assert_eq!(px(&out, 40, 25), kept, "second only");
+        assert_eq!(px(&out, 20, 15), kept, "both");
+        assert_eq!(px(&out, 55, 5), dim, "neither");
+        assert_eq!(px(&out, 8, 28), dim, "neither, inside their bounding box");
+        assert!(out.pixels().all(|p| p.0 == kept || p.0 == dim));
+    }
+
+    #[test]
+    fn annotations_stay_bright_over_a_spotlights_dark_background() {
+        // The outline and the arrow are drawn after the pixels are darkened.
+        let items = [
+            Item::Rect(Rect::new(40, 5, 15, 15), Style::DEFAULT),
+            Item::Spotlight(Rect::new(5, 5, 20, 20)),
+            Item::Highlight(Rect::new(40, 25, 15, 10), Color::Yellow),
+        ];
+        let out = render(&grey(60, 40), &items).unwrap();
+        assert_eq!(
+            px(&out, 41, 12),
+            [255, 0, 0, 255],
+            "outline outside the spotlight"
+        );
+        assert_eq!(
+            px(&out, 47, 12),
+            dimmed_grey(),
+            "inside the outline: background"
+        );
+        assert_eq!(
+            px(&out, 15, 15),
+            [128, 128, 128, 255],
+            "inside the spotlight"
+        );
+        // A highlight outside is part of the pixels, so it is dimmed with them.
+        let lit = render(&grey(60, 40), &items[2..]).unwrap();
+        let (dark, bright) = (px(&out, 45, 30), px(&lit, 45, 30));
+        assert!(
+            dark[0] < bright[0] && dark[1] < bright[1],
+            "{dark:?} vs {bright:?}"
+        );
+        assert_ne!(dark, dimmed_grey(), "still tinted yellow");
+    }
+
+    #[test]
+    fn a_crop_cuts_the_spotlit_image_last() {
+        let items = [Item::Spotlight(Rect::new(10, 10, 20, 15))];
+        let out = export(&grey(60, 40), &items, Some(Rect::new(20, 5, 30, 30))).unwrap();
+        assert_eq!((out.width(), out.height()), (30, 30));
+        // (x, y) in the crop is (x + 20, y + 5) in the image.
+        assert_eq!(
+            px(&out, 0, 10),
+            [128, 128, 128, 255],
+            "still inside the spotlight"
+        );
+        assert_eq!(
+            px(&out, 10, 20),
+            [128, 128, 128, 255],
+            "its last pixel (30, 25)"
+        );
+        assert_eq!(px(&out, 11, 20), dimmed_grey());
+        assert_eq!(px(&out, 0, 0), dimmed_grey(), "above it");
     }
 }

@@ -331,6 +331,50 @@ pub fn blend_rect_in_place(img: &mut RgbaImage, region: Rect, rgb: [u8; 3], alph
     }
 }
 
+/// Darken every pixel that is in none of the `keep` rectangles: black blended over it at `alpha`
+/// (0 = unchanged, 255 = black), leaving the alpha channel as it was. A spotlight: what is kept
+/// stands out because the rest is dimmed.
+///
+/// The darkening is applied once, outside the *union* of the rectangles, so overlapping ones
+/// never dim anything twice. Each rectangle is clamped to the image; with none that meets the
+/// image, everything is darkened. Pure, like [`pixelate`]; a darkened pixel is exactly what
+/// [`blend_rect`] with black at the same `alpha` gives.
+pub fn dim_outside(img: &RgbaImage, keep: &[Rect], alpha: u8) -> RgbaImage {
+    let mut out = img.clone();
+    dim_outside_in_place(&mut out, keep, alpha);
+    out
+}
+
+/// [`dim_outside`] on a buffer the caller owns.
+pub fn dim_outside_in_place(img: &mut RgbaImage, keep: &[Rect], alpha: u8) {
+    if alpha == 0 {
+        return;
+    }
+    let keep: Vec<(u32, u32, u32, u32)> =
+        keep.iter().filter_map(|r| clamp_region(img, *r)).collect();
+    let rest = 255 - u32::from(alpha);
+    let width = img.width() as usize;
+    // Which pixels of the current row are kept: one pass over the rectangles per row, then one
+    // over the pixels, whatever the number of rectangles.
+    let mut kept = vec![false; width];
+    for (y, row) in img.enumerate_rows_mut() {
+        kept.fill(false);
+        for &(x0, y0, x1, y1) in &keep {
+            if (y0..y1).contains(&y) {
+                kept[x0 as usize..x1 as usize].fill(true);
+            }
+        }
+        for ((_, _, p), kept) in row.zip(&kept) {
+            if !kept {
+                for c in p.0.iter_mut().take(3) {
+                    // Rounded (0·a + below·(255−a)) / 255, as in `blend_rect`.
+                    *c = ((u32::from(*c) * rest + 127) / 255) as u8;
+                }
+            }
+        }
+    }
+}
+
 /// `region` ∩ the image as `(x0, y0, x1, y1)` (exclusive ends), or `None` when they don't meet.
 fn clamp_region(img: &RgbaImage, region: Rect) -> Option<(u32, u32, u32, u32)> {
     let w = i32::try_from(img.width()).unwrap_or(i32::MAX);
@@ -1163,5 +1207,99 @@ mod tests {
         assert_eq!(out.get_pixel(0, 2).0, [10, 10, 10, 255]);
         assert_eq!(out.get_pixel(7, 5).0, [250, 250, 250, 255]);
         assert_eq!(blend_rect(&src, Rect::new(9, 0, 4, 4), [0, 0, 0], 255), src);
+    }
+
+    #[test]
+    fn dim_outside_keeps_the_inside_and_darkens_the_rest_by_exactly_alpha() {
+        let src = detailed(20, 16);
+        let keep = Rect::new(4, 3, 8, 6);
+        let out = dim_outside(&src, &[keep], 140);
+        // The same arithmetic as a black `blend_rect` over the whole image, outside the box.
+        let all_dim = blend_rect(&src, Rect::new(0, 0, 20, 16), [0, 0, 0], 140);
+        for y in 0..16u32 {
+            for x in 0..20u32 {
+                let inside = keep.contains(capture_core::Point::new(x as i32, y as i32));
+                let want = if inside { &src } else { &all_dim };
+                assert_eq!(out.get_pixel(x, y), want.get_pixel(x, y), "({x},{y})");
+            }
+        }
+        // By hand, on a flat colour: 200·(255−140)/255 = 90.2, 100·115/255 = 45.1, 7·115/255 = 3.2.
+        let flat = RgbaImage::from_pixel(6, 6, image::Rgba([200, 100, 7, 77]));
+        let out = dim_outside(&flat, &[Rect::new(2, 2, 2, 2)], 140);
+        assert_eq!(out.get_pixel(0, 0).0, [90, 45, 3, 77], "alpha channel kept");
+        assert_eq!(out.get_pixel(2, 2).0, [200, 100, 7, 77], "inside untouched");
+        assert_eq!(out.get_pixel(3, 3).0, [200, 100, 7, 77], "last kept pixel");
+        assert_eq!(out.get_pixel(4, 3).0, [90, 45, 3, 77], "right is exclusive");
+        assert_eq!(
+            out.get_pixel(3, 4).0,
+            [90, 45, 3, 77],
+            "bottom is exclusive"
+        );
+        assert_eq!(out.get_pixel(1, 2).0, [90, 45, 3, 77], "left of the box");
+    }
+
+    #[test]
+    fn dim_outside_darkens_once_outside_the_union_of_the_boxes() {
+        let src = RgbaImage::from_pixel(30, 20, image::Rgba([200, 200, 200, 255]));
+        let (a, b) = (Rect::new(2, 2, 12, 10), Rect::new(8, 6, 14, 10)); // they overlap
+        let both = dim_outside(&src, &[a, b], 140);
+        let kept = [200, 200, 200, 255];
+        let dim = [90, 90, 90, 255];
+        assert_eq!(both.get_pixel(3, 3).0, kept, "only in the first");
+        assert_eq!(both.get_pixel(20, 14).0, kept, "only in the second");
+        assert_eq!(both.get_pixel(10, 8).0, kept, "in both");
+        assert_eq!(both.get_pixel(25, 3).0, dim, "in neither: darkened once");
+        assert_eq!(both.get_pixel(0, 19).0, dim);
+        assert_eq!(
+            both.get_pixel(3, 14).0,
+            dim,
+            "in the bounding box, in neither"
+        );
+        // Every pixel is either kept or darkened exactly once — never twice.
+        assert!(both.pixels().all(|p| p.0 == kept || p.0 == dim));
+        // The order and repeats of the boxes change nothing.
+        assert_eq!(dim_outside(&src, &[b, a, a, b], 140), both);
+        // Not the same as one spotlight after the other, which would stack (90·115/255 = 41).
+        let stacked = dim_outside(&dim_outside(&src, &[a], 140), &[b], 140);
+        assert_eq!(stacked.get_pixel(25, 3).0, [41, 41, 41, 255]);
+        assert_ne!(stacked, both);
+    }
+
+    #[test]
+    fn dim_outside_clamps_the_boxes_to_the_image() {
+        let src = RgbaImage::from_pixel(8, 6, image::Rgba([100, 100, 100, 255]));
+        let dim = [45, 45, 45, 255];
+        let out = dim_outside(&src, &[Rect::new(-5, 3, 100, 100)], 140);
+        assert_eq!((out.width(), out.height()), (8, 6));
+        assert_eq!(out.get_pixel(0, 2).0, dim);
+        assert_eq!(out.get_pixel(0, 3).0, [100, 100, 100, 255]);
+        assert_eq!(out.get_pixel(7, 5).0, [100, 100, 100, 255]);
+        // A box that covers the image keeps all of it.
+        assert_eq!(dim_outside(&src, &[Rect::new(-1, -1, 50, 50)], 140), src);
+        // Boxes that miss the image, are empty, or are missing altogether: everything is dimmed.
+        for keep in [
+            vec![Rect::new(9, 0, 4, 4)],
+            vec![Rect::new(-9, -9, 4, 4), Rect::new(2, 2, 0, 3)],
+            vec![],
+        ] {
+            let out = dim_outside(&src, &keep, 140);
+            assert!(out.pixels().all(|p| p.0 == dim), "{keep:?}");
+        }
+    }
+
+    #[test]
+    fn dim_outside_alpha_limits_and_in_place_agree() {
+        let src = detailed(12, 9);
+        let keep = [Rect::new(3, 2, 4, 4)];
+        assert_eq!(dim_outside(&src, &keep, 0), src, "alpha 0 changes nothing");
+        let black = dim_outside(&src, &keep, 255);
+        assert_eq!(&black.get_pixel(0, 0).0[..3], &[0, 0, 0]);
+        assert_eq!(black.get_pixel(0, 0).0[3], src.get_pixel(0, 0).0[3]);
+        assert_eq!(black.get_pixel(4, 3), src.get_pixel(4, 3));
+        let mut buf = src.clone();
+        dim_outside_in_place(&mut buf, &keep, 140);
+        assert_eq!(buf, dim_outside(&src, &keep, 140));
+        // Translucent: detail outside survives.
+        assert_ne!(buf.get_pixel(0, 0), buf.get_pixel(1, 0));
     }
 }
