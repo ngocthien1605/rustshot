@@ -91,7 +91,14 @@ pub fn begin(gif: bool) {
         out_path: path,
     };
 
-    dispatch::with_app(|a| a.pending_record = Some(cfg));
+    // Queue the request and arm its countdown in one step; the token ties the timer to this
+    // request (see `dispatch::TimerEpoch`).
+    let Some(token) = dispatch::with_app(|a| {
+        a.pending_record = Some(cfg);
+        a.timer_epoch.arm()
+    }) else {
+        return;
+    };
 
     let countdown = settings.recording.countdown_seconds;
     if countdown == 0 {
@@ -101,7 +108,11 @@ pub fn begin(gif: bool) {
         std::thread::spawn(move || {
             std::thread::sleep(Duration::from_secs(countdown as u64));
             // HWND isn't Send; rebuild it from the raw pointer on this thread.
-            dispatch::post(HWND(hwnd_raw as *mut c_void), Action::ExecuteRecordStart);
+            dispatch::post_timed(
+                HWND(hwnd_raw as *mut c_void),
+                Action::ExecuteRecordStart,
+                token,
+            );
         });
     }
 }
@@ -157,9 +168,17 @@ pub fn toggle_pause() {
 }
 
 /// Stop and finalize the active recording. A recording still in its countdown is cancelled
-/// instead (the countdown timer then finds nothing queued and releases the gate).
+/// instead: the gate is released here, and the countdown timer's token is made stale so that
+/// when its sleep ends it is ignored rather than acting on whatever is running by then.
 pub fn stop() {
-    let cancelled = dispatch::with_app(|a| a.pending_record.take().is_some()).unwrap_or(false);
+    let cancelled = dispatch::with_app(|a| {
+        let cancelled = a.pending_record.take().is_some();
+        if cancelled {
+            a.timer_epoch.cancel();
+        }
+        cancelled
+    })
+    .unwrap_or(false);
     if cancelled {
         tracing::info!("recording countdown cancelled");
         clear_busy();
