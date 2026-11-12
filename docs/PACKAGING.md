@@ -55,8 +55,21 @@ the CI-built one, whose checksum differs). A tag older than the toolchain pin sa
 `channel = "stable"`; if a newer stable trips a clippy lint on that old code, enter `1.98.1` in
 the run form's **toolchain** field.
 
-CI (`ci.yml`) builds the same zip on every push to `master` and keeps it for 14 days as the
-`rustshot-portable` workflow artifact, so the packaging step is tested before a tag needs it.
+CI (`ci.yml`) builds the same zip on pushes to `master` or `main`, on pull requests
+(targeting any branch, preserving existing coverage), and on manual runs. It keeps the
+`rustshot-portable` workflow artifact for 7 days, so packaging is tested before a tag needs it.
+
+To build without publishing a release, open **Actions → CI → Run workflow**, select the
+branch, then click **Run workflow**. The updated workflow must first be present on the
+default branch for GitHub to expose the manual-run button. Open the completed run and
+select **rustshot-portable** under **Artifacts**. Extract the downloaded artifact archive,
+then extract `RustShot-<version>-portable-x64.zip` and run `rustshot.exe`. The portable zip
+also includes all three guides and the license; icons and the manifest are embedded in
+the executable. No repository secrets or additional paid services are required.
+
+CI retains its separate MSRV check. Superseded runs on the same ref are cancelled; the
+main check has a 30-minute timeout and the MSRV check has a 20-minute timeout. Release
+publication remains exclusively in the existing Release workflow.
 The MSI is not built by CI (WiX v3 is not guaranteed on the `windows-latest` image).
 
 ## MSI installer (WiX + cargo-wix)

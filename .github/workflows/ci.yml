@@ -4,6 +4,7 @@ on:
   push:
     branches: [main, master]
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -15,23 +16,31 @@ concurrency:
 jobs:
   check:
     runs-on: windows-latest
+    timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
       - uses: ./.github/actions/setup-rust
+      # Packaging uses target/release, so build natively rather than changing Cargo's target dir.
+      - name: Verify Windows MSVC host
+        shell: pwsh
+        run: |
+          $hostInfo = rustc -vV
+          if ($LASTEXITCODE -ne 0) { throw 'rustc failed' }
+          if ($hostInfo -notcontains 'host: x86_64-pc-windows-msvc') {
+            throw 'Portable packaging requires the x86_64-pc-windows-msvc host'
+          }
       - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@e9d7b9f1e587218970671bac74e5511ed9506e6a # v2
       - name: Install cargo-deny
-        uses: taiki-e/install-action@v2
+        uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2
         with:
           tool: cargo-deny@0.20.2
       - name: Format check
         run: cargo fmt --all -- --check
       - name: Clippy (deny warnings)
-        run: cargo clippy --workspace --all-targets -- -D warnings
-      - name: Build
-        run: cargo build --workspace --locked
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - name: Unit tests
-        run: cargo test --workspace
+        run: cargo test --workspace --locked
       - name: Dependency policy (cargo-deny)
         run: cargo deny check
       # The same script the release workflow publishes with, so packaging is exercised on
@@ -40,18 +49,19 @@ jobs:
         shell: pwsh
         run: pwsh -File scripts/build-portable.ps1
       - name: Upload portable zip
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
           name: rustshot-portable
           path: dist/*.zip
           if-no-files-found: error
-          retention-days: 14
+          retention-days: 7
 
   # The workspace promises `rust-version` in Cargo.toml; prove it still builds with that compiler.
   msrv:
     runs-on: windows-latest
+    timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
       - name: Install the minimum supported Rust
         shell: pwsh
         run: |
@@ -63,7 +73,7 @@ jobs:
           # RUSTUP_TOOLCHAIN outranks rust-toolchain.toml for every later cargo/rustc call.
           "RUSTUP_TOOLCHAIN=$msrv" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
       - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@e9d7b9f1e587218970671bac74e5511ed9506e6a # v2
         with:
           key: msrv
       - name: Check (MSRV)
